@@ -1,0 +1,39 @@
+# Data parameters
+data_path: "dataset"
+output_path: "models"
+run_name: "vqvae-training-lr-3e-4"
+batch_size: 1
+num_workers: 4
+val_split: 0.2
+seed: 42
+
+# Training parameters
+max_epochs: 1
+learning_rate: 3e-4
+save_every_n_steps: 200
+
+# Model parameters
+vqvae:
+  nfeats: 72
+  code_num: 512
+  code_dim: 512
+  output_emb_width: 512
+  down_t: 2
+  stride_t: 2
+  width: 512
+  depth: 3
+  dilation_growth_rate: 3
+  activation: "relu"
+  apply_rotation_trick: false
+
+# Optimizer parameters
+optimizer:
+  type: "adam"
+  betas: [0.9, 0.99]
+  weight_decay: 0.0
+
+# Learning rate scheduler parameters
+lr_scheduler:
+  type: "cosine_decay"  # options: "cosine_decay" or "none"
+  decay_steps: 1000  # total number of steps for cosine decay
+  min_lr_factor: 0.1  # minimum lr will be learning_rate * min_lr_factor 
