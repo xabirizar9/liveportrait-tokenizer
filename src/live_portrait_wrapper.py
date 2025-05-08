@@ -136,7 +136,7 @@ class LivePortraitWrapper(object):
         """
         with torch.no_grad(), self.inference_ctx():
             kp_info = self.motion_extractor(x)
-
+            
             if self.inference_cfg.flag_use_half_precision:
                 # float the dict
                 for k, v in kp_info.items():
@@ -144,6 +144,7 @@ class LivePortraitWrapper(object):
                         kp_info[k] = v.float()
 
         flag_refine_info: bool = kwargs.get('flag_refine_info', True)
+        
         if flag_refine_info:
             bs = kp_info['kp'].shape[0]
             kp_info['pitch'] = headpose_pred_to_degree(kp_info['pitch'])[:, None]  # Bx1

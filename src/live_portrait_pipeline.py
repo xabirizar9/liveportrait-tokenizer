@@ -26,6 +26,7 @@ from .utils.filter import smooth
 from .utils.rprint import rlog as log
 # from .utils.viz import viz_lmk
 from .live_portrait_wrapper import LivePortraitWrapper
+from src.modules.vqvae import VQVae
 
 
 def make_abs_path(fn):
@@ -47,6 +48,8 @@ class LivePortraitPipeline(object):
             'c_eyes_lst': [],
             'c_lip_lst': [],
         }
+
+        
 
         for i in track(range(n_frames), description='Making motion templates...', total=n_frames):
             # collect s, R, δ and t for inference

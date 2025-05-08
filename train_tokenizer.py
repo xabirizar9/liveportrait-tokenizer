@@ -59,23 +59,32 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         video_path = self.video_paths[idx]
         video = imageio.get_reader(video_path)
+        fps = video.get_meta_data()['fps']
         frames = np.array([frame for frame in video])
         output = self.prepare_videos(frames)
-        return output
+
+        metadata = {
+            'video_path': str(video_path),
+            'fps': fps
+        }
+
+        return output, metadata
 
     def __len__(self):
         return len(self.video_paths)
 
 
 class VQVAEModule(pl.LightningModule):
-    def __init__(self, nfeats=72, code_num=512, code_dim=512, output_emb_width=512,
+    def __init__(self, nfeats=63, code_num=512, code_dim=512, output_emb_width=512,
                  down_t=3, stride_t=2, width=512, depth=3, dilation_growth_rate=3,
                  activation="relu", apply_rotation_trick=False, lr=1e-4,
                  lr_scheduler='cosine_decay', decay_steps=100000):
         super().__init__()
         self.save_hyperparameters()
 
-        self.m_extr = MotionExtractor()
+        self.m_extr = MotionExtractor(
+            num_kp=21
+        )
         self.m_extr.load_pretrained(init_path="pretrained_weights/liveportrait/base_models/motion_extractor.pth")
 
         # Freeze MotionExtractor parameters to prevent training
@@ -225,12 +234,7 @@ def main(config):
     # Compose a concise run name
     lr_str = f"lr{config['learning_rate']}".replace('.', 'p')
     bs_str = f"bs{config['batch_size']}"
-    code_num_str = f"c{config['code_num']}" if 'code_num' in config else ""
-    run_name = f"vqvae-{lr_str}-{bs_str}{('-' + code_num_str) if code_num_str else ''}"
-
-    # Optionally, allow user to override or append to run_name
-    if 'run_name' in config and config['run_name']:
-        run_name = f"{config['run_name']}-{lr_str}-{bs_str}{('-' + code_num_str) if code_num_str else ''}"
+    run_name = f"vqvae-{lr_str}-{bs_str}"
 
     config['run_name'] = run_name
 
@@ -266,17 +270,17 @@ def main(config):
 
     # Set up model
     model = VQVAEModule(
-        nfeats=config['nfeats'],
-        code_num=config['code_num'],
-        code_dim=config['code_dim'],
-        output_emb_width=config['output_emb_width'],
-        down_t=config['down_t'],
-        stride_t=config['stride_t'],
-        width=config['width'],
-        depth=config['depth'],
-        dilation_growth_rate=config['dilation_growth_rate'],
-        activation=config['activation'],
-        apply_rotation_trick=config['apply_rotation_trick'],
+        nfeats=config['vqvae']['nfeats'],
+        code_num=config['vqvae']['code_num'],
+        code_dim=config['vqvae']['code_dim'],
+        output_emb_width=config['vqvae']['output_emb_width'],
+        down_t=config['vqvae']['down_t'],
+        stride_t=config['vqvae']['stride_t'],
+        width=config['vqvae']['width'],
+        depth=config['vqvae']['depth'],
+        dilation_growth_rate=config['vqvae']['dilation_growth_rate'],
+        activation=config['vqvae']['activation'],
+        apply_rotation_trick=config['vqvae']['apply_rotation_trick'],
         lr=config['learning_rate'],
         lr_scheduler=config['lr_scheduler']['type'],
         decay_steps=config['lr_scheduler']['decay_steps']
@@ -285,20 +289,22 @@ def main(config):
     # Set up callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath=str(Path(config['output_path']) / 'checkpoints'),
-        filename='vqvae-{epoch:02d}-step-{step}-loss-{train_loss:.4f}',
+        filename='vqvae-{epoch:02d}-step-{step}',
         save_top_k=3,
         save_last=True,
         every_n_train_steps=config['save_every_n_steps'],
         monitor='train_loss',
-        mode='min'
+        mode='min',
+        save_weights_only=True  # Only save model weights
     )
 
     val_checkpoint_callback = ModelCheckpoint(
         dirpath=str(Path(config['output_path']) / 'val_checkpoints'),
-        filename='vqvae-val-{epoch:02d}-loss-{val_loss:.4f}',
+        filename='vqvae-val-{epoch:02d}-step-{step}',
         save_top_k=3,
         monitor='val_loss',
-        mode='min'
+        mode='min',
+        save_weights_only=True  # Only save model weights
     )
 
     callbacks = [checkpoint_callback, val_checkpoint_callback]
@@ -341,7 +347,10 @@ def main(config):
     run_name = config.get('run_name', 'vqvae')
     final_model_path = str(Path(config['output_path']) / f"{run_name}_final_{timestamp}.pth")
     if trainer.global_rank == 0:  # Only save on the main process
-        model_state = model.vqvae.state_dict()
+        # Only save VQVAE parameters
+        model_state = {k: v for k, v in model.state_dict().items() if k.startswith('vqvae.')}
+        # Remove 'vqvae.' prefix from keys
+        model_state = {k[6:]: v for k, v in model_state.items()}
         torch.save(model_state, final_model_path)
         print(f"Saved final model to {final_model_path}")
 

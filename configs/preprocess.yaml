@@ -1,0 +1,11 @@
+# Data paths
+data_path: "dataset"
+output_path: "dataset/pickles"
+
+# Model configurations
+live_portrait_config: "configs/live_portrait.yaml"
+cropper_config: "configs/cropper.yaml"
+
+# Processing settings
+batch_size: 1
+num_workers: 8
