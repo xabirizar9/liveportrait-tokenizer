@@ -23,6 +23,11 @@ else
   exit 1
 fi
 
+# if this line fails, run again:
+# ls -l /dev/disk/by-id/google* | grep "google-celebv-hq" to find the <disk id> will be smth like nvme0n2
+# then run:
+# sudo mount -o discard,defaults /dev/<disk_id> $MOUNTING_PATH
+
 echo "Mounting disk $DISK_PATH to $MOUNTING_PATH..."
 sudo mount -o discard,defaults $DISK_PATH $MOUNTING_PATH
 
