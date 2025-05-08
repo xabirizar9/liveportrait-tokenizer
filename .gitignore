@@ -2,4 +2,3 @@ models/
 dataset
 pretrained_weights/
 *.pyc
-*.pkl
