@@ -28,10 +28,12 @@ class VQVae(nn.Module):
                  norm=None,
                  activation: str = "relu",
                  apply_rotation_trick: bool = True,
+                 use_quantization: bool = True,
                  **kwargs) -> None:
 
         super().__init__()
         self.code_dim = code_dim
+        self.use_quantization = use_quantization
 
         self.encoder = Encoder(
             input_emb_width=nfeats,
@@ -80,33 +82,39 @@ class VQVae(nn.Module):
         # Encode
         x_encoder = self.encoder(x_in)
 
-        # quantization
-        x_quantized, commit_loss, perplexity = self.quantizer(x_encoder)
+        # Skip quantization if use_quantization is False
+        if self.use_quantization:
+            # quantization
+            x_quantized, commit_loss, perplexity = self.quantizer(x_encoder)
 
-        # Compute rotation matrix with detached gradients and apply rotation
-        if self.apply_rotation_trick:
-            with torch.no_grad():
-                # Normalize vectors for computing rotation
-                e_norm = F.normalize(x_encoder.detach(), dim=-1)
-            q_norm = F.normalize(x_quantized.detach(), dim=-1)
+            # Compute rotation matrix with detached gradients and apply rotation
+            if self.apply_rotation_trick:
+                with torch.no_grad():
+                    # Normalize vectors for computing rotation
+                    e_norm = F.normalize(x_encoder.detach(), dim=-1)
+                q_norm = F.normalize(x_quantized.detach(), dim=-1)
 
-            # Compute r = (e + q)/||e + q|| for Householder reflection
-            r = (e_norm + q_norm)
-            r = F.normalize(r, dim=-1)
+                # Compute r = (e + q)/||e + q|| for Householder reflection
+                r = (e_norm + q_norm)
+                r = F.normalize(r, dim=-1)
 
-            # Compute rotation matrix R = I - 2rr^T + 2qe^T
-            B, L, D = x_encoder.shape
-            I = torch.eye(D, device=x_encoder.device).expand(B, L, D, D)
-            rrt = torch.einsum('bli,blj->blij', r, r)
-            qet = torch.einsum('bli,blj->blij', q_norm, e_norm)
-            R = I - 2 * rrt + 2 * qet
+                # Compute rotation matrix R = I - 2rr^T + 2qe^T
+                B, L, D = x_encoder.shape
+                I = torch.eye(D, device=x_encoder.device).expand(B, L, D, D)
+                rrt = torch.einsum('bli,blj->blij', r, r)
+                qet = torch.einsum('bli,blj->blij', q_norm, e_norm)
+                R = I - 2 * rrt + 2 * qet
 
-            # Scale factor to preserve norms
-            scaling = (x_quantized.norm(dim=-1) / x_encoder.norm(dim=-1)).unsqueeze(-1)
+                # Scale factor to preserve norms
+                scaling = (x_quantized.norm(dim=-1) / x_encoder.norm(dim=-1)).unsqueeze(-1)
 
-            # Apply rotation and scaling as constants during backprop
-            x_quantized = scaling * torch.einsum('blij,blj->bli', R, x_encoder)
-
+                # Apply rotation and scaling as constants during backprop
+                x_quantized = scaling * torch.einsum('blij,blj->bli', R, x_encoder)
+        else:
+            # Skip quantization - use encoder output directly
+            x_quantized = x_encoder
+            commit_loss = torch.tensor(0.0, device=x_encoder.device)
+            perplexity = torch.tensor(0.0, device=x_encoder.device)
 
         # decoder
         x_decoder = self.decoder(x_quantized)
@@ -132,15 +140,26 @@ class VQVae(nn.Module):
         x_encoder = self.postprocess(x_encoder) # permutation
         x_encoder = x_encoder.contiguous().view(-1, x_encoder.shape[-1])  # (NT, C)
 
-        code_idx = self.quantizer.quantize(x_encoder) # quantize to codebook
-        code_idx = code_idx.view(N, -1)
+        if self.use_quantization:
+            code_idx = self.quantizer.quantize(x_encoder) # quantize to codebook
+            code_idx = code_idx.view(N, -1)
+        else:
+            # Return the raw encoder output when not using quantization
+            # Pack the continuous representation as if it were discrete codes
+            code_idx = x_encoder.view(N, -1)
 
         # latent, dist
         return code_idx, None
 
     def decode(self, z: Tensor):
-        x_d = self.quantizer.dequantize(z)
-        x_d = x_d.view(1, -1, self.code_dim).permute(0, 2, 1).contiguous()
+        if self.use_quantization:
+            x_d = self.quantizer.dequantize(z)
+            x_d = x_d.view(1, -1, self.code_dim).permute(0, 2, 1).contiguous()
+        else:
+            # In non-quantized mode, reshape the latent representation directly
+            # Assume z is already in the correct format (N, T*C)
+            N = z.size(0)
+            x_d = z.view(N, -1, self.code_dim).permute(0, 2, 1).contiguous()
 
         # Expected output length after decoding (assuming each token represents a timestep)
         # This is an approximation - we multiply by stride_t^down_t since that's the theoretical downsampling

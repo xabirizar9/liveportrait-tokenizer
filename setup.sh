@@ -18,6 +18,8 @@ if [[ $DISK_ID == *"sda"* ]]; then
   DISK_PATH="/dev/sda"
 elif [[ $DISK_ID == *"sdb"* ]]; then
   DISK_PATH="/dev/sdb"
+elif [[ $DISK_ID == *"nvme0n2"* ]]; then
+  DISK_PATH="/dev/nvme0n2"
 else
   echo "Error: Could not find the CelebV-HQ disk"
   exit 1

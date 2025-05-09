@@ -1,8 +1,6 @@
 import torch
 import numpy as np
 import pandas as pd
-import cv2
-import imageio
 import os
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -19,80 +17,68 @@ from datetime import datetime
 
 from torch.utils.data import DataLoader
 
-from src.modules.motion_extractor import MotionExtractor
-from src.live_portrait_wrapper import LivePortraitWrapper
 from src.modules.vqvae import VQVae
+from src.dataset import Dataset
 
 
-class Dataset(torch.utils.data.Dataset):
-    def __init__(self, data_path: str, split: str = 'train', val_split: float = 0.2, seed: int = 42):
-        self.data_path = Path(data_path)
-        self.video_dir = self.data_path / "train"
-        self.split = split
-        self.val_split = val_split
-        self.seed = seed
-
-        self.video_list = pd.read_csv(self.data_path / "videos_by_timestamp.csv")
-        self.video_paths = [self.video_dir / f"{video_id}.mp4" for video_id in self.video_list['original_video_id'].unique()]
-
-        # Split the dataset
-        np.random.seed(seed)
-        indices = np.random.permutation(len(self.video_paths))
-        split_idx = int(len(indices) * (1 - val_split))
-
-        if split == 'train':
-            self.video_paths = [self.video_paths[i] for i in indices[:split_idx]]
-        else:  # val
-            self.video_paths = [self.video_paths[i] for i in indices[split_idx:]]
-
-    def prepare_videos(self, imgs) -> torch.Tensor:
-        """ construct the input as standard
-        imgs: NxBxHxWx3, uint8
-        """
-        N, H, W, C = imgs.shape
-        _imgs = imgs.reshape(N, H, W, C, 1)
-        y = _imgs.astype(np.float32) / 255.
-        y = np.clip(y, 0, 1)  # clip to 0~1
-        y = torch.from_numpy(y).permute(0, 4, 3, 1, 2)  # TxHxWx3x1 -> Tx1x3xHxW
-        return y
-
-    def __getitem__(self, idx):
-        video_path = self.video_paths[idx]
-        video = imageio.get_reader(video_path)
-        fps = video.get_meta_data()['fps']
-        frames = np.array([frame for frame in video])
-        output = self.prepare_videos(frames)
-
-        metadata = {
-            'video_path': str(video_path),
-            'fps': fps
-        }
-
-        return output, metadata
-
-    def __len__(self):
-        return len(self.video_paths)
+def collate_fn(batch, max_seq_len=300):
+    """
+    Custom collate function for batching samples with fixed sequence length
+    Args:
+        batch: A list containing samples from dataset
+        max_seq_len: Fixed sequence length to use (longer sequences will be cropped, shorter ones padded)
+    Returns:
+        Batched tensors with standardized sequence length
+    """
+    features_list = []
+    
+    for sample in batch:
+        kp = sample['kp']
+        exp = sample['exp']
+        x_s = sample['x_s']
+        t = sample['t']
+        R = sample['R']
+        scale = sample['scale']
+        
+        # Get sequence length from the first dimension of kp
+        seq_len = kp.shape[0]
+        
+        # Reshape to (seq_len, -1)
+        kp = kp.reshape(seq_len, -1)  # [seq_len, 21*3]
+        exp = exp.reshape(seq_len, -1)  # [seq_len, 21*3]
+        x_s = x_s.reshape(seq_len, -1)  # [seq_len, 21*3]
+        t = t.reshape(seq_len, -1)  # [seq_len, 3]
+        R = R.reshape(seq_len, -1)  # [seq_len, 9]
+        scale = scale.reshape(seq_len, -1)  # [seq_len, 1]
+        # Concatenate features
+        features = torch.cat([kp, exp, x_s, t, R, scale], dim=1)  # [seq_len, 201]
+        
+        # Crop if longer than max_seq_len
+        if seq_len > max_seq_len:
+            features = features[:max_seq_len]
+        
+        # Pad if shorter than max_seq_len
+        elif seq_len < max_seq_len:
+            padding = torch.zeros((max_seq_len - seq_len, features.shape[1]), 
+                                 dtype=features.dtype, device=features.device)
+            features = torch.cat([features, padding], dim=0)
+        
+        features_list.append(features)
+    
+    # Stack along a new batch dimension
+    batched_features = torch.stack(features_list)  # [batch_size, max_seq_len, feature_dim]
+    
+    return {'features': batched_features}  # [batch_size, max_seq_len, feature_dim]
 
 
 class VQVAEModule(pl.LightningModule):
     def __init__(self, nfeats=63, code_num=512, code_dim=512, output_emb_width=512,
                  down_t=3, stride_t=2, width=512, depth=3, dilation_growth_rate=3,
-                 activation="relu", apply_rotation_trick=False, lr=1e-4,
-                 lr_scheduler='cosine_decay', decay_steps=100000):
+                 activation="relu", apply_rotation_trick=False, use_quantization=True, lr=1e-4,
+                 lr_scheduler='cosine_decay', decay_steps=100000,
+                 warmup_steps=1000, warmup_factor=0.1, min_lr_factor=0.1):
         super().__init__()
         self.save_hyperparameters()
-
-        self.m_extr = MotionExtractor(
-            num_kp=21
-        )
-        self.m_extr.load_pretrained(init_path="pretrained_weights/liveportrait/base_models/motion_extractor.pth")
-
-        # Freeze MotionExtractor parameters to prevent training
-        for param in self.m_extr.parameters():
-            param.requires_grad = False
-
-        # Explicitly set model to eval mode to ensure inference behavior
-        self.m_extr.eval()
 
         self.vqvae = VQVae(
             nfeats=nfeats,
@@ -105,79 +91,77 @@ class VQVAEModule(pl.LightningModule):
             depth=depth,
             dilation_growth_rate=dilation_growth_rate,
             activation=activation,
-            apply_rotation_trick=apply_rotation_trick
+            apply_rotation_trick=apply_rotation_trick,
+            use_quantization=use_quantization,
         )
 
         # Ensure learning rate is a float
         self.lr = float(lr)
         self.lr_scheduler = lr_scheduler
         self.decay_steps = decay_steps
+        self.warmup_steps = warmup_steps
+        self.warmup_factor = warmup_factor  # Initial LR multiplier during warmup
+        self.min_lr_factor = min_lr_factor  # Minimum LR multiplier after decay
 
     def training_step(self, batch, batch_idx):
-        # Ensure MotionExtractor is in eval mode
-        self.m_extr.eval()
+        # Get features from batch
+        features = batch['features']  # Shape: [batch_size, max_seq_len, feature_dim]
 
-        # Extract keypoints for each frame in the batch (only working for batch size 1)
-        with torch.no_grad():
-            kp_vid = torch.stack([self.m_extr(image)['kp'].squeeze(0) for image in batch[0]])
-        kp_vid = kp_vid.unsqueeze(0)
         # Forward pass through VQVAE
-        reconstr, commit_loss, perplexity = self.vqvae(kp_vid)
+        reconstr, commit_loss, perplexity = self.vqvae(features)
 
         # Calculate reconstruction loss (MSE)
-        recon_loss = F.mse_loss(reconstr, kp_vid)
-
+        recon_loss = F.mse_loss(reconstr, features)
+        
         # Total loss
         total_loss = recon_loss + commit_loss
 
-        # Determine if we're using multiple GPUs
-        sync_dist = True  # Always sync metrics in distributed training
 
         # Log metrics with proper sync_dist setting
-        self.log('train_loss', total_loss, prog_bar=True, sync_dist=sync_dist, rank_zero_only=True)
-        self.log('train_recon_loss', recon_loss, sync_dist=sync_dist, rank_zero_only=True)
-        self.log('train_commit_loss', commit_loss, sync_dist=sync_dist, rank_zero_only=True)
-        self.log('train_perplexity', perplexity, sync_dist=sync_dist, rank_zero_only=True)
+        # Main loss metrics - show in progress bar but only log epoch averages to wandb
+        self.log('train_loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         
-        # Log current learning rate
-        current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
-        self.log('learning_rate', current_lr, sync_dist=sync_dist, rank_zero_only=True)
+        # Detailed component losses - only log epoch averages to wandb
+        self.log('train_recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('train_commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('train_perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        
+        # If you want more frequent logging for specific metrics, use logging_interval
+        # Log learning rate at regular intervals (every N steps based on trainer.log_every_n_steps)
+        if batch_idx % self.trainer.log_every_n_steps == 0:
+            current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
+            self.log('learning_rate', current_lr, sync_dist=True, rank_zero_only=True)
 
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        # Ensure MotionExtractor is in eval mode
-        self.m_extr.eval()
-
-        # Extract keypoints for each frame in the batch
-        with torch.no_grad():
-            kp_vid = torch.stack([self.m_extr(image)['kp'].squeeze(0) for image in batch[0]])
-        kp_vid = kp_vid.unsqueeze(0)
+        # Get features from batch
+        features = batch['features']  # Shape: [batch_size, max_seq_len, feature_dim]
 
         # Forward pass through VQVAE
-        reconstr, commit_loss, perplexity = self.vqvae(kp_vid)
+        reconstr, commit_loss, perplexity = self.vqvae(features)
 
         # Calculate reconstruction loss (MSE)
-        recon_loss = F.mse_loss(reconstr, kp_vid)
+        recon_loss = F.mse_loss(reconstr, features)
 
         # Total loss
         total_loss = recon_loss + commit_loss
 
-        # Determine if we're using multiple GPUs
-        sync_dist = True  # Always sync metrics in distributed training
-
-        # Log metrics with proper sync_dist setting
-        self.log('val_loss', total_loss, prog_bar=True, sync_dist=sync_dist, rank_zero_only=True)
-        self.log('val_recon_loss', recon_loss, sync_dist=sync_dist, rank_zero_only=True)
-        self.log('val_commit_loss', commit_loss, sync_dist=sync_dist, rank_zero_only=True)
-        self.log('val_perplexity', perplexity, sync_dist=sync_dist, rank_zero_only=True)
+        # For validation, we typically want epoch-level statistics only
+        self.log('val_loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('val_recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('val_commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('val_perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
 
         return total_loss
 
     def on_validation_epoch_end(self):
-        # Log current learning rate
-        self.vqvae.quantizer.get_token_usage_stats()
-    
+        # Get token usage stats
+        token_usage_stats = self.vqvae.quantizer.get_token_usage_stats()
+        
+        # Log each stat separately instead of the whole dictionary
+        for key, value in token_usage_stats.items():
+            self.log(f'token_stats/{key}', value, sync_dist=True, rank_zero_only=True)
 
     def configure_optimizers(self):
         # Only optimize VQVAE parameters, not MotionExtractor
@@ -191,16 +175,24 @@ class VQVAEModule(pl.LightningModule):
         if self.lr_scheduler == 'none':
             return optimizer
         elif self.lr_scheduler == 'cosine_decay':
-            # Custom cosine decay scheduler that only decays without cycling
-            def cosine_decay(step):
-                progress = min(1.0, step / self.decay_steps)
-                cosine_decay = 0.5 * (1 + torch.cos(torch.tensor(progress * torch.pi)))
-                return cosine_decay * (1 - 0.1) + 0.1  # Scale to [0.1, 1.0] range
+            # Custom scheduler with warmup and cosine decay
+            def warmup_cosine_decay(step):
+                if step < self.warmup_steps:
+                    # Linear warmup
+                    alpha = float(step) / float(max(1, self.warmup_steps))
+                    # Scale from warmup_factor to 1.0
+                    return self.warmup_factor + alpha * (1.0 - self.warmup_factor)
+                else:
+                    # Cosine decay from 1.0 to min_lr_factor after warmup
+                    progress = min(1.0, (step - self.warmup_steps) / float(max(1, self.decay_steps - self.warmup_steps)))
+                    cosine_decay = 0.5 * (1.0 + torch.cos(torch.tensor(progress * torch.pi)))
+                    # Scale from 1.0 to min_lr_factor
+                    return self.min_lr_factor + cosine_decay * (1.0 - self.min_lr_factor)
 
             scheduler = {
                 'scheduler': torch.optim.lr_scheduler.LambdaLR(
                     optimizer,
-                    lr_lambda=cosine_decay
+                    lr_lambda=warmup_cosine_decay
                 ),
                 'interval': 'step',
                 'frequency': 1
@@ -234,30 +226,65 @@ def main(config):
     # Compose a concise run name
     lr_str = f"lr{config['learning_rate']}".replace('.', 'p')
     bs_str = f"bs{config['batch_size']}"
-    run_name = f"vqvae-{lr_str}-{bs_str}"
-
-    config['run_name'] = run_name
+    epochs_str = f"e{config['max_epochs']}"
+    tokens_str = f"t{config['vqvae']['code_num']}"
+    dim_str = f"d{config['vqvae']['code_dim']}"
+    
+    # Add quantization status to run name
+    use_quantization = config['vqvae'].get('use_quantization', True)
+    quant_str = "vq" if use_quantization else "vae"
+    
+    run_name = f"{config['run_name']}-{quant_str}-{lr_str}-{bs_str}-{epochs_str}-{tokens_str}-{dim_str}"
 
     # Initialize wandb only on the main process
     if is_main_process:
         wandb.init(
             project="liveportrait-tokenizer",
-            name=config['run_name'],
+            name=run_name,
             config=config,
             dir=str(Path(config['output_path']) / "wandb")
         )
 
     # Set up data
-    train_dataset = Dataset(config['data_path'], split='train', val_split=config['val_split'], seed=config['seed'])
-    val_dataset = Dataset(config['data_path'], split='val', val_split=config['val_split'], seed=config['seed'])
-    print(f"Loaded {len(train_dataset)} training videos and {len(val_dataset)} validation videos")
+    # Get compute_stats from config, default to True if not specified
+    compute_stats = config.get('compute_stats', True)
+    print(f"Config: \n{config}")
+    # Create train dataset with normalization stats computation
+    train_dataset = Dataset(
+        config['data_path'], 
+        split='train', 
+        val_split=config['val_split'], 
+        seed=config['seed'],
+        compute_stats=compute_stats
+    )
+    
+    # Create validation dataset, reusing the statistics from training set
+    val_dataset = Dataset(
+        config['data_path'], 
+        split='val', 
+        val_split=config['val_split'], 
+        seed=config['seed'],
+        compute_stats=False  # Don't compute stats for validation set
+    )
+    
+    # If train dataset has computed stats, copy them to val dataset
+    if train_dataset.mean is not None and train_dataset.std is not None and val_dataset.mean is None:
+        val_dataset.mean = train_dataset.mean
+        val_dataset.std = train_dataset.std
+        
+    print(f"Loaded {len(train_dataset)} training pickle files and {len(val_dataset)} validation pickle files")
+
+    # Create a collate function with the configured max_seq_len
+    max_seq_len = config.get('max_seq_len', 300)  # Default to 300 if not specified
+    collate_fn_with_max_len = lambda batch: collate_fn(batch, max_seq_len=max_seq_len)
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=config['batch_size'],
         num_workers=config['num_workers'],
         shuffle=True,
-        persistent_workers=True if config['num_workers'] > 0 else False
+        persistent_workers=True if config['num_workers'] > 0 else False,
+        collate_fn=collate_fn_with_max_len
     )
 
     val_loader = DataLoader(
@@ -265,7 +292,8 @@ def main(config):
         batch_size=config['batch_size'],
         num_workers=config['num_workers'],
         shuffle=False,
-        persistent_workers=True if config['num_workers'] > 0 else False
+        persistent_workers=True if config['num_workers'] > 0 else False,
+        collate_fn=collate_fn_with_max_len
     )
 
     # Set up model
@@ -281,9 +309,13 @@ def main(config):
         dilation_growth_rate=config['vqvae']['dilation_growth_rate'],
         activation=config['vqvae']['activation'],
         apply_rotation_trick=config['vqvae']['apply_rotation_trick'],
+        use_quantization=config['vqvae'].get('use_quantization', True),
         lr=config['learning_rate'],
         lr_scheduler=config['lr_scheduler']['type'],
-        decay_steps=config['lr_scheduler']['decay_steps']
+        decay_steps=config['lr_scheduler']['decay_steps'],
+        warmup_steps=config['lr_scheduler']['warmup_steps'],
+        warmup_factor=config['lr_scheduler']['warmup_factor'],
+        min_lr_factor=config['lr_scheduler']['min_lr_factor']
     )
 
     # Set up callbacks
@@ -292,8 +324,8 @@ def main(config):
         filename='vqvae-{epoch:02d}-step-{step}',
         save_top_k=3,
         save_last=True,
-        every_n_train_steps=config['save_every_n_steps'],
-        monitor='train_loss',
+        every_n_epochs=config['checkpoint_frequency'],  # Use checkpoint frequency from config
+        monitor='val_loss',
         mode='min',
         save_weights_only=True  # Only save model weights
     )
@@ -314,7 +346,7 @@ def main(config):
     if is_main_process:
         logger = WandbLogger(
             project="liveportrait-tokenizer",
-            name=config['run_name'],
+            name=run_name,
             log_model=False,
             save_dir=Path(config['output_path']) / "wandb"
         )
@@ -330,10 +362,9 @@ def main(config):
         strategy="ddp",
         precision="bf16-mixed",
         default_root_dir=str(config['output_path']),
-        accumulate_grad_batches=4,
-        log_every_n_steps=10,
-        val_check_interval=100,
-        limit_val_batches=100,
+        accumulate_grad_batches=1,
+        log_every_n_steps=config['log_every_n_steps'],
+        check_val_every_n_epoch=config['check_val_every_n_epoch'],  # Validate only every N epochs
         sync_batchnorm=True,
         enable_progress_bar=is_main_process,
         enable_model_summary=is_main_process,
@@ -344,7 +375,6 @@ def main(config):
 
     # Save final model
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = config.get('run_name', 'vqvae')
     final_model_path = str(Path(config['output_path']) / f"{run_name}_final_{timestamp}.pth")
     if trainer.global_rank == 0:  # Only save on the main process
         # Only save VQVAE parameters
@@ -373,7 +403,8 @@ if __name__ == "__main__":
 # python train_tokenizer.py \
 # --data_path dataset \
 # --output_path models \
-# --batch_size 1 \
+# --batch_size 32 \  # Now supports batching with variable sequence lengths
+# --max_seq_len 300 \  # Maximum sequence length (longer sequences will be cropped)
 # --num_workers 4 \
 # --max_epochs 1 \
 # --learning_rate 3e-4 \
