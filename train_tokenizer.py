@@ -3,19 +3,23 @@ import numpy as np
 import pandas as pd
 import os
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import WandbLogger
 import wandb
-import torch.nn.functional as F
-import torch.distributed
 import yaml
-from pathlib import Path
-from argparse import ArgumentParser
 import signal
 import sys
-from datetime import datetime
 
+import torch.nn.functional as F
+import torch.distributed
+
+from pathlib import Path
+from argparse import ArgumentParser
+from datetime import datetime
+from pprint import pprint
+
+from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader
+
 
 from src.modules.vqvae import VQVae
 from src.dataset import Dataset
@@ -34,24 +38,26 @@ def collate_fn(batch, max_seq_len=300):
     
     for sample in batch:
         kp = sample['kp']
-        exp = sample['exp']
-        x_s = sample['x_s']
-        t = sample['t']
-        R = sample['R']
-        scale = sample['scale']
+        velocity = sample['velocity']
+        # exp = sample['exp']
+        # x_s = sample['x_s']
+        # t = sample['t']
+        # R = sample['R']
+        # scale = sample['scale']
         
         # Get sequence length from the first dimension of kp
         seq_len = kp.shape[0]
         
         # Reshape to (seq_len, -1)
         kp = kp.reshape(seq_len, -1)  # [seq_len, 21*3]
-        exp = exp.reshape(seq_len, -1)  # [seq_len, 21*3]
-        x_s = x_s.reshape(seq_len, -1)  # [seq_len, 21*3]
-        t = t.reshape(seq_len, -1)  # [seq_len, 3]
-        R = R.reshape(seq_len, -1)  # [seq_len, 9]
-        scale = scale.reshape(seq_len, -1)  # [seq_len, 1]
+        velocity = velocity.reshape(seq_len, -1)  # [seq_len, 21*3]
+        # exp = exp.reshape(seq_len, -1)  # [seq_len, 21*3]
+        # x_s = x_s.reshape(seq_len, -1)  # [seq_len, 21*3]
+        # t = t.reshape(seq_len, -1)  # [seq_len, 3]
+        # R = R.reshape(seq_len, -1)  # [seq_len, 9]
+        # scale = scale.reshape(seq_len, -1)  # [seq_len, 1]
         # Concatenate features
-        features = torch.cat([kp, exp, x_s, t, R, scale], dim=1)  # [seq_len, 201]
+        features = torch.cat([kp, velocity], dim=1)  # [seq_len, 126]
         
         # Crop if longer than max_seq_len
         if seq_len > max_seq_len:
@@ -72,28 +78,14 @@ def collate_fn(batch, max_seq_len=300):
 
 
 class VQVAEModule(pl.LightningModule):
-    def __init__(self, nfeats=63, code_num=512, code_dim=512, output_emb_width=512,
-                 down_t=3, stride_t=2, width=512, depth=3, dilation_growth_rate=3,
-                 activation="relu", apply_rotation_trick=False, use_quantization=True, lr=1e-4,
+    def __init__(self, vqvae_config, losses_config, lr=1e-4,
                  lr_scheduler='cosine_decay', decay_steps=100000,
                  warmup_steps=1000, warmup_factor=0.1, min_lr_factor=0.1):
         super().__init__()
         self.save_hyperparameters()
 
-        self.vqvae = VQVae(
-            nfeats=nfeats,
-            code_num=code_num,
-            code_dim=code_dim,
-            output_emb_width=output_emb_width,
-            down_t=down_t,
-            stride_t=stride_t,
-            width=width,
-            depth=depth,
-            dilation_growth_rate=dilation_growth_rate,
-            activation=activation,
-            apply_rotation_trick=apply_rotation_trick,
-            use_quantization=use_quantization,
-        )
+        self.vqvae = VQVae(**vqvae_config)
+        self.losses_config = losses_config
 
         # Ensure learning rate is a float
         self.lr = float(lr)
@@ -111,26 +103,31 @@ class VQVAEModule(pl.LightningModule):
         reconstr, commit_loss, perplexity = self.vqvae(features)
 
         # Calculate reconstruction loss (MSE)
-        recon_loss = F.mse_loss(reconstr, features)
-        
+        recon_loss = F.smooth_l1_loss(reconstr, features)
+        velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:], features[:, :, 63:])
         # Total loss
-        total_loss = recon_loss + commit_loss
+        total_loss = (
+            self.losses_config['lambda_feature'] * recon_loss + 
+            self.losses_config['lambda_velocity'] * velocity_loss + 
+            self.losses_config['lambda_commit'] * commit_loss
+        )
 
 
         # Log metrics with proper sync_dist setting
         # Main loss metrics - show in progress bar but only log epoch averages to wandb
-        self.log('train_loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('train/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('train/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         
         # Detailed component losses - only log epoch averages to wandb
-        self.log('train_recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        self.log('train_commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        self.log('train_perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('train/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('train/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('train/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         
         # If you want more frequent logging for specific metrics, use logging_interval
         # Log learning rate at regular intervals (every N steps based on trainer.log_every_n_steps)
         if batch_idx % self.trainer.log_every_n_steps == 0:
             current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
-            self.log('learning_rate', current_lr, sync_dist=True, rank_zero_only=True)
+            self.log('train/learning_rate', current_lr, sync_dist=True, rank_zero_only=True)
 
         return total_loss
 
@@ -142,16 +139,21 @@ class VQVAEModule(pl.LightningModule):
         reconstr, commit_loss, perplexity = self.vqvae(features)
 
         # Calculate reconstruction loss (MSE)
-        recon_loss = F.mse_loss(reconstr, features)
-
+        recon_loss = F.smooth_l1_loss(reconstr, features)
+        velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:], features[:, :, 63:])
         # Total loss
-        total_loss = recon_loss + commit_loss
+        total_loss = (
+            self.losses_config['lambda_feature'] * recon_loss + 
+            self.losses_config['lambda_velocity'] * velocity_loss + 
+            self.losses_config['lambda_commit'] * commit_loss
+        )
 
         # For validation, we typically want epoch-level statistics only
-        self.log('val_loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        self.log('val_recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        self.log('val_commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        self.log('val_perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('val/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('val/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('val/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('val/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
 
         return total_loss
 
@@ -212,43 +214,40 @@ def load_config(config_path):
 def main(config):
     torch.set_float32_matmul_precision('medium')
 
-    num_gpus = len(os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(','))
-    
-    # Override config num_gpus with actual available GPUs
-    config['num_gpus'] = num_gpus
-
-    # Initialize wandb only on the main process
-    if torch.cuda.is_available() and num_gpus > 1:
-        is_main_process = (os.environ.get('LOCAL_RANK', '0') == '0')
-    else:
-        is_main_process = True
+    # Determine if this is the main process for distributed training
+    is_main_process = (torch.cuda.is_available() and 
+                      len(os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')) > 1 and
+                      os.environ.get('LOCAL_RANK', '0') == '0') or True
 
     # Compose a concise run name
     lr_str = f"lr{config['learning_rate']}".replace('.', 'p')
     bs_str = f"bs{config['batch_size']}"
     epochs_str = f"e{config['max_epochs']}"
-    tokens_str = f"t{config['vqvae']['code_num']}"
-    dim_str = f"d{config['vqvae']['code_dim']}"
+    cur_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Add quantization status to run name
-    use_quantization = config['vqvae'].get('use_quantization', True)
-    quant_str = "vq" if use_quantization else "vae"
-    
-    run_name = f"{config['run_name']}-{quant_str}-{lr_str}-{bs_str}-{epochs_str}-{tokens_str}-{dim_str}"
+    run_name = f"{cur_time}-{config['run_name']}-{lr_str}-{bs_str}-{epochs_str}"
 
-    # Initialize wandb only on the main process
+    # Create run-specific directory structure
+    run_dir = Path(config['output_path']) / run_name
+    checkpoints_dir = run_dir / 'checkpoints'
+    
+
+    logger = None
     if is_main_process:
-        wandb.init(
+        logger = WandbLogger(
             project="liveportrait-tokenizer",
             name=run_name,
             config=config,
-            dir=str(Path(config['output_path']) / "wandb")
+            log_model=False,
+            save_dir=str(run_dir)
         )
+        logger.log_hyperparams(config)
+        pprint(f"Config: \n{config}")
+
 
     # Set up data
     # Get compute_stats from config, default to True if not specified
     compute_stats = config.get('compute_stats', True)
-    print(f"Config: \n{config}")
     # Create train dataset with normalization stats computation
     train_dataset = Dataset(
         config['data_path'], 
@@ -275,8 +274,7 @@ def main(config):
     print(f"Loaded {len(train_dataset)} training pickle files and {len(val_dataset)} validation pickle files")
 
     # Create a collate function with the configured max_seq_len
-    max_seq_len = config.get('max_seq_len', 300)  # Default to 300 if not specified
-    collate_fn_with_max_len = lambda batch: collate_fn(batch, max_seq_len=max_seq_len)
+    collate_fn_with_max_len = lambda batch: collate_fn(batch, max_seq_len=config['max_seq_len'])
 
     train_loader = DataLoader(
         train_dataset,
@@ -298,18 +296,8 @@ def main(config):
 
     # Set up model
     model = VQVAEModule(
-        nfeats=config['vqvae']['nfeats'],
-        code_num=config['vqvae']['code_num'],
-        code_dim=config['vqvae']['code_dim'],
-        output_emb_width=config['vqvae']['output_emb_width'],
-        down_t=config['vqvae']['down_t'],
-        stride_t=config['vqvae']['stride_t'],
-        width=config['vqvae']['width'],
-        depth=config['vqvae']['depth'],
-        dilation_growth_rate=config['vqvae']['dilation_growth_rate'],
-        activation=config['vqvae']['activation'],
-        apply_rotation_trick=config['vqvae']['apply_rotation_trick'],
-        use_quantization=config['vqvae'].get('use_quantization', True),
+        vqvae_config=config['vqvae'],
+        losses_config=config['losses'],
         lr=config['learning_rate'],
         lr_scheduler=config['lr_scheduler']['type'],
         decay_steps=config['lr_scheduler']['decay_steps'],
@@ -320,37 +308,18 @@ def main(config):
 
     # Set up callbacks
     checkpoint_callback = ModelCheckpoint(
-        dirpath=str(Path(config['output_path']) / 'checkpoints'),
-        filename='vqvae-{epoch:02d}-step-{step}',
-        save_top_k=3,
-        save_last=True,
+        dirpath=str(checkpoints_dir),
+        filename='checkpoint_{epoch:03d}',
+        save_top_k=5,  # Save all checkpoints
+        monitor='val/loss',
         every_n_epochs=config['checkpoint_frequency'],  # Use checkpoint frequency from config
-        monitor='val_loss',
         mode='min',
-        save_weights_only=True  # Only save model weights
+        save_weights_only=True,  # Only save model weights
+        save_last=True,  # Don't save last checkpoint
+        save_on_train_epoch_end=False,  # Only save on validation
     )
 
-    val_checkpoint_callback = ModelCheckpoint(
-        dirpath=str(Path(config['output_path']) / 'val_checkpoints'),
-        filename='vqvae-val-{epoch:02d}-step-{step}',
-        save_top_k=3,
-        monitor='val_loss',
-        mode='min',
-        save_weights_only=True  # Only save model weights
-    )
-
-    callbacks = [checkpoint_callback, val_checkpoint_callback]
-
-    # Set up wandb logger only on main process
-    logger = None
-    if is_main_process:
-        logger = WandbLogger(
-            project="liveportrait-tokenizer",
-            name=run_name,
-            log_model=False,
-            save_dir=Path(config['output_path']) / "wandb"
-        )
-        logger.log_hyperparams(config)
+    callbacks = [checkpoint_callback]
 
     # Set up trainer with proper distributed training settings
     trainer = pl.Trainer(
@@ -361,7 +330,7 @@ def main(config):
         devices="auto",
         strategy="ddp",
         precision="bf16-mixed",
-        default_root_dir=str(config['output_path']),
+        default_root_dir=str(run_dir),  # Set the root directory for the run
         accumulate_grad_batches=1,
         log_every_n_steps=config['log_every_n_steps'],
         check_val_every_n_epoch=config['check_val_every_n_epoch'],  # Validate only every N epochs
@@ -375,7 +344,7 @@ def main(config):
 
     # Save final model
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    final_model_path = str(Path(config['output_path']) / f"{run_name}_final_{timestamp}.pth")
+    final_model_path = str(run_dir / f"final_{timestamp}.pth")
     if trainer.global_rank == 0:  # Only save on the main process
         # Only save VQVAE parameters
         model_state = {k: v for k, v in model.state_dict().items() if k.startswith('vqvae.')}

@@ -110,7 +110,6 @@ class QuantizeEMAReset(nn.Module):
 
             stats = {
                 'codebook/unique_tokens': used_tokens,
-                'codebook/total_tokens': total_tokens,
                 'codebook/usage_percent': usage_percentage,
             }
 
@@ -136,7 +135,7 @@ class QuantizeEMAReset(nn.Module):
         # Update embeddings
         if self.training:
             perplexity = self.update_codebook(x, code_idx)
-        else :
+        else:
             perplexity = self.compute_perplexity(code_idx)
 
         # Loss

@@ -2,3 +2,4 @@ models/
 dataset
 pretrained_weights/
 *.pyc
+outputs/

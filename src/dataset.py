@@ -147,57 +147,44 @@ class Dataset(torch.utils.data.Dataset):
         R_shape = rotations.shape
         scale_shape = scales.shape
         
-        # Get the mean and std for keypoints (first 63 features)
-        kp_mean = self.mean[:63]
-        kp_std = self.std[:63]
-        
-        # Get the mean and std for expressions (next 63 features)
-        exp_mean = self.mean[63:126]
-        exp_std = self.std[63:126]
-        
-        # Get the mean and std for x_s (next 63 features)
-        x_s_mean = self.mean[126:189]
-        x_s_std = self.std[126:189]
-        
-        # Get the mean and std for translations (next 3 features)
-        t_mean = self.mean[189:192]
-        t_std = self.std[189:192]
-        
-        # Get the mean and std for rotations (next 9 features)
-        R_mean = self.mean[192:201]
-        R_std = self.std[192:201]
-        
-        # Get the mean and std for scales (next 1 feature)
-        scale_mean = self.mean[201]
-        scale_std = self.std[201]
-        
         # Reshape kps and apply normalization
         kps = kps.reshape(kp_shape[0], -1)  # Flatten to (n_frames, 63)
-        kps = (kps - kp_mean) / kp_std
+        kps = (kps - self.mean[:63]) / self.std[:63]
         kps = kps.reshape(kp_shape)  # Reshape back to original shape
-        
-        # Reshape exps and apply normalization
-        exps = exps.reshape(exp_shape[0], -1)  # Flatten to (n_frames, 63)
-        exps = (exps - exp_mean) / exp_std
-        exps = exps.reshape(exp_shape)  # Reshape back to original shape
 
-        # Reshape x_s and apply normalization
-        x_s = x_s.reshape(x_s_shape[0], -1)  # Flatten to (n_frames, 63)
-        x_s = (x_s - x_s_mean) / x_s_std
-        x_s = x_s.reshape(x_s_shape)  # Reshape back to original shape
+
+        # Calculate velocity using central difference for interior points
+        kps_flat = kps.reshape(kp_shape[0], -1)
+        dt = 1 / output_fps
+        velocity = torch.zeros_like(kps_flat)
+        velocity[1:-1] = (kps_flat[2:] - kps_flat[:-2]) / (2 * dt)
+        velocity[0] = (kps_flat[1] - kps_flat[0]) / dt
+        velocity[-1] = (kps_flat[-1] - kps_flat[-2]) / dt
+        velocity = velocity.reshape(kp_shape)
         
-        # Reshape translations and apply normalization
-        translations = translations.reshape(t_shape[0], -1)  # Flatten to (n_frames, 3)
-        translations = (translations - t_mean) / t_std
-        translations = translations.reshape(t_shape)  # Reshape back to original shape
+        # # Reshape exps and apply normalization
+        # exps = exps.reshape(exp_shape[0], -1)  # Flatten to (n_frames, 63)
+        # exps = (exps - self.mean[63:126]) / self.std[63:126]
+        # exps = exps.reshape(exp_shape)  # Reshape back to original shape
+
+        # # Reshape x_s and apply normalization
+        # x_s = x_s.reshape(x_s_shape[0], -1)  # Flatten to (n_frames, 63)
+        # x_s = (x_s - self.mean[126:189]) / self.std[126:189]
+        # x_s = x_s.reshape(x_s_shape)  # Reshape back to original shape
         
-        # Reshape rotations and apply normalization
-        rotations = rotations.reshape(R_shape[0], -1)  # Flatten to (n_frames, 9)
-        rotations = (rotations - R_mean) / R_std
-        rotations = rotations.reshape(R_shape)  # Reshape back to original shape
+        # # Reshape translations and apply normalization
+        # translations = translations.reshape(t_shape[0], -1)  # Flatten to (n_frames, 3)
+        # translations = (translations - self.mean[189:192]) / self.std[189:192]
+        # translations = translations.reshape(t_shape)  # Reshape back to original shape
         
-        # Apply normalization to scales
-        scales = (scales - scale_mean) / scale_std
+        # # Reshape rotations and apply normalization
+        # rotations = rotations.reshape(R_shape[0], -1)  # Flatten to (n_frames, 9)
+        # rotations = (rotations - self.mean[192:201]) / self.std[192:201]
+        # rotations = rotations.reshape(R_shape)  # Reshape back to original shape
+        
+        # # Apply normalization to scales
+        # scales = (scales - self.mean[201]) / self.std[201]
+        
         # Metadata
         metadata = {
             'pickle_path': str(pickle_path),
@@ -208,6 +195,7 @@ class Dataset(torch.utils.data.Dataset):
         # Return the structured data
         return {
             'kp': kps,
+            'velocity': velocity,
             'exp': exps,
             'x_s': x_s,
             't': translations,

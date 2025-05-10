@@ -1,8 +1,8 @@
 # Data parameters
 data_path: "dataset"
-output_path: "models"
-run_name: "vqvae-train-full-feats"
-batch_size: 64
+output_path: "outputs"
+run_name: "vqvae-velocity-reg"
+batch_size: 32
 num_workers: 8
 val_split: 0.1
 seed: 42
@@ -11,15 +11,15 @@ max_seq_len: 300  # Maximum sequence length for training
 
 # Training parameters
 max_epochs: 300
-learning_rate: 1e-4
-check_val_every_n_epoch: 10  # Validate every N epochs
-checkpoint_frequency: 10  # Save checkpoint every M epochs
-log_every_n_steps: 50    # Log to terminal every N steps
-step_log_frequency: 20    # Log steps to wandb (1=all steps, higher=less frequent)
+learning_rate: 2e-5
+check_val_every_n_epoch: 10
+checkpoint_frequency: 10
+log_every_n_steps: 50
+step_log_frequency: 20
 
 # Model parameters
 vqvae:
-  nfeats: 202
+  nfeats: 126
   code_num: 512
   code_dim: 512
   output_emb_width: 512
@@ -32,6 +32,11 @@ vqvae:
   apply_rotation_trick: false
   use_quantization: true
 
+losses:
+  lambda_feature: 1.0
+  lambda_velocity: 0.1
+  lambda_commit: 0.02
+
 # Optimizer parameters
 optimizer:
   type: "adam"
@@ -40,8 +45,8 @@ optimizer:
 
 # Learning rate scheduler parameters
 lr_scheduler:
-  type: "cosine_"  # options: "cosine_decay" or "none"
-  decay_steps: 10000  # total number of steps for cosine decay
+  type: "cosine_decay"  # options: "cosine_decay" or "none"
+  decay_steps: 5000  # total number of steps for cosine decay
   min_lr_factor: 0.1  # minimum lr will be learning_rate * min_lr_factor 
   warmup_steps: 100  # number of steps for linear warmup
   warmup_factor: 0.1  # initial lr factor during warmup (lr will start at learning_rate * warmup_factor) 
