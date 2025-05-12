@@ -1,7 +1,7 @@
 # Data parameters
 data_path: "dataset"
 output_path: "outputs"
-run_name: "vqvae-velocity-reg"
+run_name: "vqvae-t-feats"
 batch_size: 32
 num_workers: 8
 val_split: 0.1
@@ -19,7 +19,7 @@ step_log_frequency: 20
 
 # Model parameters
 vqvae:
-  nfeats: 126
+  nfeats: 3
   code_num: 512
   code_dim: 512
   output_emb_width: 512
@@ -34,7 +34,7 @@ vqvae:
 
 losses:
   lambda_feature: 1.0
-  lambda_velocity: 0.1
+  lambda_velocity: 0.3
   lambda_commit: 0.02
 
 # Optimizer parameters
@@ -49,4 +49,4 @@ lr_scheduler:
   decay_steps: 5000  # total number of steps for cosine decay
   min_lr_factor: 0.1  # minimum lr will be learning_rate * min_lr_factor 
   warmup_steps: 100  # number of steps for linear warmup
-  warmup_factor: 0.1  # initial lr factor during warmup (lr will start at learning_rate * warmup_factor) 
+  warmup_factor: 0.1  # initial lr factor during warmup (lr will start at learning_rate * warmup_factor)

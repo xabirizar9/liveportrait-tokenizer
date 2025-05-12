@@ -55,7 +55,14 @@ class Dataset(torch.utils.data.Dataset):
 
     def compute_statistics(self, pickle_paths, stats_path):
         """Compute mean and std of the entire dataset for normalization"""
-        all_features = []
+        feature_data = {
+            'kp': [],
+            'exp': [],
+            'x_s': [],
+            't': [],
+            'R': [],
+            'scale': []
+        }
 
         print(f"Computing statistics for {len(pickle_paths)} samples")
         
@@ -67,31 +74,84 @@ class Dataset(torch.utils.data.Dataset):
             
             # Extract keypoints and expressions
             for m in motion:
-                # Stack keypoints and expressions horizontally
-                kp = torch.tensor(m['kp']).reshape(-1, 63)  # Reshape to (frames, 21*3)
-                exp = torch.tensor(m['exp']).reshape(-1, 63)  # Reshape to (frames, 21*3)
-                x_s = torch.tensor(m['x_s']).reshape(-1, 63)  # Reshape to (frames, 21*3)
-                t = torch.tensor(m['t']).reshape(-1, 3)  # Reshape to (frames, 3)
-                R = torch.tensor(m['R']).reshape(-1, 9)  # Reshape to (frames, 3, 3)
-                scale = torch.tensor(m['scale']).reshape(-1, 1)  # Reshape to (frames,)
-                features = torch.cat([kp, exp, x_s, t, R, scale], dim=1)  # Shape: (frames, 201)
-                all_features.append(features)
+                feature_data['kp'].append(torch.tensor(m['kp']).reshape(-1, 63))
+                feature_data['exp'].append(torch.tensor(m['exp']).reshape(-1, 63))
+                feature_data['x_s'].append(torch.tensor(m['x_s']).reshape(-1, 63))
+                feature_data['t'].append(torch.tensor(m['t']).reshape(-1, 3))
+                feature_data['R'].append(torch.tensor(m['R']).reshape(-1, 9))
+                feature_data['scale'].append(torch.tensor(m['scale']).reshape(-1, 1))
         
-        # Stack all features (shape: total_frames, feature_dim)
-        all_features = torch.cat(all_features, dim=0)
+        # Stack all features by type
+        stacked_features = {}
+        for key in feature_data:
+            stacked_features[key] = torch.cat(feature_data[key], dim=0)
         
-        # Compute statistics along the first dimension (per feature)
-        self.mean = all_features.mean(dim=0)  # Shape: (feature_dim,)
-        self.std = all_features.std(dim=0)  # Shape: (feature_dim,)
+        # Compute statistics for each feature type
+        self.mean = {}
+        self.std = {}
         
-        # Replace any zero std with 1 to avoid division by zero
-        self.std = torch.where(self.std == 0, torch.ones_like(self.std), self.std)
+        for key in stacked_features:
+            self.mean[key] = stacked_features[key].mean(dim=0)
+            self.std[key] = stacked_features[key].std(dim=0)
+            self.std[key] = torch.where(self.std[key] == 0, torch.ones_like(self.std[key]), self.std[key])
         
         # Save statistics
         with open(stats_path, 'wb') as f:
             pickle.dump({'mean': self.mean, 'std': self.std}, f)
         
-        print(f"Computed feature-wise statistics: mean shape={self.mean.shape}, std shape={self.std.shape}")
+        print(f"Computed feature-wise statistics successfully")
+    
+
+    def calculate_velocity(self, kp, output_fps):
+        kp_shape = kp.shape
+        kp_flat = kp.reshape(kp_shape[0], -1)
+        dt = 1 / output_fps
+        velocity = torch.zeros_like(kp_flat)
+        velocity[1:-1] = (kp_flat[2:] - kp_flat[:-2]) / (2 * dt)
+        velocity[0] = (kp_flat[1] - kp_flat[0]) / dt
+        velocity[-1] = (kp_flat[-1] - kp_flat[-2]) / dt
+        return velocity.reshape(kp_shape)
+
+    
+    def normalize_features(self, feature, feature_type):
+        feature_shape = feature.shape
+        feature_flat = feature.reshape(feature_shape[0], -1)
+        feature_flat = (feature_flat - self.mean[feature_type]) / self.std[feature_type]
+        return feature_flat.reshape(feature_shape)
+    
+    def denormalize_features(self, feature, feature_type):
+        """Denormalize features by applying the reverse normalization operation"""
+        feature_shape = feature.shape
+        feature_flat = feature.reshape(feature_shape[0], -1)
+        feature_flat = feature_flat * self.std[feature_type] + self.mean[feature_type]
+        return feature_flat.reshape(feature_shape)
+
+    def denormalize_item(self, item):
+        """Denormalize an entire item returned by __getitem__"""
+        # Make a copy to avoid modifying the original
+        result = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in item.items()}
+        
+        # Map between item keys and feature types
+        feature_map = {
+            'kp': 'kp',
+            'exp': 'exp',
+            'x_s': 'x_s',
+            't': 't',
+            'R': 'R',
+            'scale': 'scale'
+        }
+        
+        # Denormalize each feature
+        for key, feature_type in feature_map.items():
+            if key in result and isinstance(result[key], torch.Tensor):
+                if key == 'scale':
+                    result[key] = self.denormalize_features(result[key].reshape(-1, 1), feature_type).squeeze(-1)
+                else:
+                    result[key] = self.denormalize_features(result[key], feature_type)
+        
+        # Note: We don't denormalize velocity as it was derived from already normalized data
+        
+        return result
 
     def __getitem__(self, idx):
         pickle_path = self.pickle_paths[idx]
@@ -107,83 +167,24 @@ class Dataset(torch.utils.data.Dataset):
         c_eyes_lst = data['c_eyes_lst']
         c_lip_lst = data['c_lip_lst']
         
-
         # Extract keypoints for all frames
-        kps = []
-        exps = []
-        x_s = []
-        translations = []
-        rotations = []
-        scales = []
-        c_eyes = []
-        c_lip = []
+        kps = torch.stack([torch.tensor(m['kp']) for m in motion])  # Shape: (n_frames, 1, 21, 3)
+        exps = torch.stack([torch.tensor(m['exp']) for m in motion])  # Shape: (n_frames, 1, 21, 3)
+        x_s = torch.stack([torch.tensor(m['x_s']) for m in motion])  # Shape: (n_frames, 1, 21, 3)
+        translations = torch.stack([torch.tensor(m['t']) for m in motion])  # Shape: (n_frames, 1, 3)
+        rotations = torch.stack([torch.tensor(m['R']) for m in motion])  # Shape: (n_frames, 3, 3)
+        scales = torch.stack([torch.tensor(m['scale']) for m in motion])  # Shape: (n_frames,)
+        c_eyes = torch.stack([torch.tensor(c_eyes_lst[i]).squeeze(0) for i in range(len(c_eyes_lst))])  # Shape: (n_frames, 2)
+        c_lip = torch.stack([torch.tensor(c_lip_lst[i]).squeeze(0) for i in range(len(c_lip_lst))])  # Shape: (n_frames, 2)    
 
-        for i, m in enumerate(motion):
-            kps.append(torch.tensor(m['kp']))  # Shape: (n_frames, 1, 21, 3)
-            exps.append(torch.tensor(m['exp']))  # Shape: (n_frames, 1, 21, 3)
-            x_s.append(torch.tensor(m['x_s']))  # Shape: (n_frames, 1, 21, 3)
-            translations.append(torch.tensor(m['t']))  # Shape: (n_frames, 1, 3)
-            rotations.append(torch.tensor(m['R']))  # Shape: (n_frames, 3, 3)
-            scales.append(torch.tensor(m['scale']))  # Shape: (n_frames,)
-            c_eyes.append(torch.tensor(c_eyes_lst[i]).squeeze(0))  # Shape: (n_frames, 2)
-            c_lip.append(torch.tensor(c_lip_lst[i]).squeeze(0))  # Shape: (n_frames, 2)
+        kps = self.normalize_features(feature=kps, feature_type='kp')
+        exps = self.normalize_features(feature=exps, feature_type='exp')
+        x_s = self.normalize_features(feature=x_s, feature_type='x_s')
+        translations = self.normalize_features(feature=translations, feature_type='t')
+        rotations = self.normalize_features(feature=rotations, feature_type='R')
+        scales = self.normalize_features(feature=scales, feature_type='scale')
 
-        kps = torch.stack(kps)  # Shape: (n_frames, 1, 21, 3)
-        exps = torch.stack(exps)  # Shape: (n_frames, 1, 21, 3)
-        x_s = torch.stack(x_s)  # Shape: (n_frames, 1, 21, 3)
-        translations = torch.stack(translations)  # Shape: (n_frames, 1, 3)
-        rotations = torch.stack(rotations)  # Shape: (n_frames, 3, 3)
-        scales = torch.stack(scales)  # Shape: (n_frames,)
-
-        # Stack c_eyes and c_lip lists
-        c_eyes_lst = torch.stack(c_eyes)  # Shape: (n_frames, 2)
-        c_lip_lst = torch.stack(c_lip)  # Shape: (n_frames, 2)
-    
-        # Reshape tensors for proper broadcasting
-        kp_shape = kps.shape
-        exp_shape = exps.shape
-        x_s_shape = x_s.shape
-        t_shape = translations.shape
-        R_shape = rotations.shape
-        scale_shape = scales.shape
-        
-        # Reshape kps and apply normalization
-        kps = kps.reshape(kp_shape[0], -1)  # Flatten to (n_frames, 63)
-        kps = (kps - self.mean[:63]) / self.std[:63]
-        kps = kps.reshape(kp_shape)  # Reshape back to original shape
-
-
-        # Calculate velocity using central difference for interior points
-        kps_flat = kps.reshape(kp_shape[0], -1)
-        dt = 1 / output_fps
-        velocity = torch.zeros_like(kps_flat)
-        velocity[1:-1] = (kps_flat[2:] - kps_flat[:-2]) / (2 * dt)
-        velocity[0] = (kps_flat[1] - kps_flat[0]) / dt
-        velocity[-1] = (kps_flat[-1] - kps_flat[-2]) / dt
-        velocity = velocity.reshape(kp_shape)
-        
-        # # Reshape exps and apply normalization
-        # exps = exps.reshape(exp_shape[0], -1)  # Flatten to (n_frames, 63)
-        # exps = (exps - self.mean[63:126]) / self.std[63:126]
-        # exps = exps.reshape(exp_shape)  # Reshape back to original shape
-
-        # # Reshape x_s and apply normalization
-        # x_s = x_s.reshape(x_s_shape[0], -1)  # Flatten to (n_frames, 63)
-        # x_s = (x_s - self.mean[126:189]) / self.std[126:189]
-        # x_s = x_s.reshape(x_s_shape)  # Reshape back to original shape
-        
-        # # Reshape translations and apply normalization
-        # translations = translations.reshape(t_shape[0], -1)  # Flatten to (n_frames, 3)
-        # translations = (translations - self.mean[189:192]) / self.std[189:192]
-        # translations = translations.reshape(t_shape)  # Reshape back to original shape
-        
-        # # Reshape rotations and apply normalization
-        # rotations = rotations.reshape(R_shape[0], -1)  # Flatten to (n_frames, 9)
-        # rotations = (rotations - self.mean[192:201]) / self.std[192:201]
-        # rotations = rotations.reshape(R_shape)  # Reshape back to original shape
-        
-        # # Apply normalization to scales
-        # scales = (scales - self.mean[201]) / self.std[201]
+        velocity = self.calculate_velocity(kps, output_fps)
         
         # Metadata
         metadata = {
@@ -201,8 +202,8 @@ class Dataset(torch.utils.data.Dataset):
             't': translations,
             'R': rotations,
             'scale': scales,
-            'c_eyes_lst': c_eyes_lst,
-            'c_lip_lst': c_lip_lst,
+            'c_eyes_lst': c_eyes,
+            'c_lip_lst': c_lip,
             'metadata': metadata
         }
 
