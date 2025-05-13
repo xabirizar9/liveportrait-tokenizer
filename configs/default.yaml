@@ -1,7 +1,7 @@
 # Data parameters
 data_path: "dataset"
 output_path: "outputs"
-run_name: "vqvae-t-feats"
+run_name: "vqvae-full-except-exp-feats"
 batch_size: 32
 num_workers: 8
 val_split: 0.1
@@ -19,7 +19,7 @@ step_log_frequency: 20
 
 # Model parameters
 vqvae:
-  nfeats: 3
+  nfeats: 9
   code_num: 512
   code_dim: 512
   output_emb_width: 512
@@ -45,7 +45,7 @@ optimizer:
 
 # Learning rate scheduler parameters
 lr_scheduler:
-  type: "cosine_decay"  # options: "cosine_decay" or "none"
+  type: "none"  # options: "cosine_decay" or "none"
   decay_steps: 5000  # total number of steps for cosine decay
   min_lr_factor: 0.1  # minimum lr will be learning_rate * min_lr_factor 
   warmup_steps: 100  # number of steps for linear warmup

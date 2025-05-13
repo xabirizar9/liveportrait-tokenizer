@@ -35,29 +35,45 @@ def collate_fn(batch, max_seq_len=300):
         Batched tensors with standardized sequence length
     """
     features_list = []
+
+    feats_enabled = {
+        'kp': True,
+        'velocity': True,
+        'exp': False,
+        'x_s': True,
+        't': True,
+        'R': True,
+        'scale': True,
+    }
     
     for sample in batch:
-        # kp = sample['kp']
-        # velocity = sample['velocity']
-        # exp = sample['exp']
-        # x_s = sample['x_s']
-        t = sample['t']
-        # R = sample['R']
-        # scale = sample['scale']
-        
-        # Get sequence length from the first dimension of kp
-        seq_len = t.shape[0]
-        
-        # Reshape to (seq_len, -1)
-        # kp = kp.reshape(seq_len, -1)  # [seq_len, 21*3]
-        # velocity = velocity.reshape(seq_len, -1)  # [seq_len, 21*3]
-        # exp = exp.reshape(seq_len, -1)  std# [seq_len, 21*3]
-        # x_s = x_s.reshape(seq_len, -1)  # [seq_len, 21*3]
-        t = t.reshape(seq_len, -1)  # [seq_len, 3]
-        # R = R.reshape(seq_len, -1)  # [seq_len, 9]
-        # scale = scale.reshape(seq_len, -1)  # [seq_len, 1]
+        feats = []
+        seq_len = sample['kp'].shape[0]
+
+        if feats_enabled['kp']:
+            kp = sample['kp'].reshape(seq_len, -1)  # [seq_len, 21*3]
+            feats.append(kp)
+        if feats_enabled['velocity']:
+            velocity = sample['velocity'].reshape(seq_len, -1)  # [seq_len, 21*3]
+            feats.append(velocity)
+        if feats_enabled['exp']:
+            exp = sample['exp'].reshape(seq_len, -1)  # [seq_len, 21*3]
+            feats.append(exp)
+        if feats_enabled['x_s']:
+            x_s = sample['x_s'].reshape(seq_len, -1)  # [seq_len, 21*3]
+            feats.append(x_s)
+        if feats_enabled['t']:
+            t = sample['t'].reshape(seq_len, -1)  # [seq_len, 3]
+            feats.append(t)
+        if feats_enabled['R']:
+            R = sample['R'].reshape(seq_len, -1)  # [seq_len, 9]
+            feats.append(R)
+        if feats_enabled['scale']:
+            scale = sample['scale'].reshape(seq_len, -1)  # [seq_len, 1]
+            feats.append(scale)
+    
         # Concatenate features
-        features = torch.cat([t], dim=1)  # [seq_len, 126]
+        features = torch.cat(feats, dim=1)  # [seq_len, N_feats]
         
         # Crop if longer than max_seq_len
         if seq_len > max_seq_len:
@@ -103,11 +119,11 @@ class VQVAEModule(pl.LightningModule):
 
         # Calculate reconstruction loss (MSE)
         recon_loss = F.smooth_l1_loss(reconstr, features)
-        # velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:], features[:, :, 63:])
+        velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:126], features[:, :, 63:126])
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            # self.losses_config['lambda_velocity'] * velocity_loss + 
+            self.losses_config['lambda_velocity'] * velocity_loss + 
             self.losses_config['lambda_commit'] * commit_loss
         )
 
@@ -115,7 +131,7 @@ class VQVAEModule(pl.LightningModule):
         # Log metrics with proper sync_dist setting
         # Main loss metrics - show in progress bar but only log epoch averages to wandb
         self.log('train/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        # self.log('train/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('train/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         
         # Detailed component losses - only log epoch averages to wandb
         self.log('train/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
@@ -139,18 +155,18 @@ class VQVAEModule(pl.LightningModule):
 
         # Calculate reconstruction loss (MSE)
         recon_loss = F.smooth_l1_loss(reconstr, features)
-        # velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:], features[:, :, 63:])
+        velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:126], features[:, :, 63:126])
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            # self.losses_config['lambda_velocity'] * velocity_loss + 
+            self.losses_config['lambda_velocity'] * velocity_loss + 
             self.losses_config['lambda_commit'] * commit_loss
         )
 
         # For validation, we typically want epoch-level statistics only
         self.log('val/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        # self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
 
