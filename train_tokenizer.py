@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 
 
 from src.modules.vqvae import VQVae
+from src.modules.res_vqvae import ResVQVae
 from src.dataset import Dataset
 
 
@@ -37,13 +38,14 @@ def collate_fn(batch, max_seq_len=300):
     features_list = []
 
     feats_enabled = {
-        'kp': True,
+        'kp': False,
         'velocity': True,
-        'exp': False,
-        'x_s': True,
-        't': True,
-        'R': True,
-        'scale': True,
+        'exp': True,
+        'acceleration': True,
+        'x_s': False,
+        't': False,
+        'R': False,
+        'scale': False,
     }
     
     for sample in batch:
@@ -56,6 +58,9 @@ def collate_fn(batch, max_seq_len=300):
         if feats_enabled['velocity']:
             velocity = sample['velocity'].reshape(seq_len, -1)  # [seq_len, 21*3]
             feats.append(velocity)
+        if feats_enabled['acceleration']:
+            acceleration = sample['acceleration'].reshape(seq_len, -1)  # [seq_len, 21*3]
+            feats.append(acceleration)
         if feats_enabled['exp']:
             exp = sample['exp'].reshape(seq_len, -1)  # [seq_len, 21*3]
             feats.append(exp)
@@ -100,7 +105,9 @@ class VQVAEModule(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
-        self.vqvae = VQVae(**vqvae_config)
+        self.vqvae = VQVae(
+            # quant_depth=3,
+            **vqvae_config)
         self.losses_config = losses_config
 
         # Ensure learning rate is a float
@@ -119,11 +126,11 @@ class VQVAEModule(pl.LightningModule):
 
         # Calculate reconstruction loss (MSE)
         recon_loss = F.smooth_l1_loss(reconstr, features)
-        velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:126], features[:, :, 63:126])
+        # velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:126], features[:, :, 63:126])
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            self.losses_config['lambda_velocity'] * velocity_loss + 
+            # self.losses_config['lambda_velocity'] * velocity_loss + 
             self.losses_config['lambda_commit'] * commit_loss
         )
 
@@ -131,7 +138,7 @@ class VQVAEModule(pl.LightningModule):
         # Log metrics with proper sync_dist setting
         # Main loss metrics - show in progress bar but only log epoch averages to wandb
         self.log('train/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        self.log('train/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        # self.log('train/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         
         # Detailed component losses - only log epoch averages to wandb
         self.log('train/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
@@ -155,18 +162,18 @@ class VQVAEModule(pl.LightningModule):
 
         # Calculate reconstruction loss (MSE)
         recon_loss = F.smooth_l1_loss(reconstr, features)
-        velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:126], features[:, :, 63:126])
+        # velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:126], features[:, :, 63:126])
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            self.losses_config['lambda_velocity'] * velocity_loss + 
+            # self.losses_config['lambda_velocity'] * velocity_loss + 
             self.losses_config['lambda_commit'] * commit_loss
         )
 
         # For validation, we typically want epoch-level statistics only
         self.log('val/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        # self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
 

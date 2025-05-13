@@ -102,17 +102,59 @@ class Dataset(torch.utils.data.Dataset):
         print(f"Computed feature-wise statistics successfully")
     
 
-    def calculate_velocity(self, kp, output_fps):
-        kp_shape = kp.shape
-        kp_flat = kp.reshape(kp_shape[0], -1)
+    def calculate_derivative(self, feature, output_fps, order=1):
+        """
+        Calculate time derivatives (velocity, acceleration, etc.) for any feature.
+        Args:
+            feature: Tensor of feature values with shape [frames, ...]
+            output_fps: Frames per second for calculating time delta
+            order: Order of the derivative (1=velocity, 2=acceleration, etc.)
+        Returns:
+            Tensor of same shape as input with calculated derivatives
+        """
+        if order < 1:
+            return feature
+            
+        # Save original shape and flatten to [frames, -1]
+        feature_shape = feature.shape
+        feature_flat = feature.reshape(feature_shape[0], -1)
         dt = 1 / output_fps
-        velocity = torch.zeros_like(kp_flat)
-        velocity[1:-1] = (kp_flat[2:] - kp_flat[:-2]) / (2 * dt)
-        velocity[0] = (kp_flat[1] - kp_flat[0]) / dt
-        velocity[-1] = (kp_flat[-1] - kp_flat[-2]) / dt
-        return velocity.reshape(kp_shape)
-
+        
+        # First derivative calculation (velocity)
+        derivative = torch.zeros_like(feature_flat)
+        derivative[1:-1] = (feature_flat[2:] - feature_flat[:-2]) / (2 * dt)
+        derivative[0] = (feature_flat[1] - feature_flat[0]) / dt
+        derivative[-1] = (feature_flat[-1] - feature_flat[-2]) / dt
+        
+        # For higher order derivatives, recursively call this function
+        if order > 1:
+            derivative = self.calculate_derivative(derivative.reshape(feature_shape), output_fps, order-1)
+            return derivative
+            
+        return derivative.reshape(feature_shape)
     
+    def calculate_velocity(self, feature, output_fps):
+        """
+        Calculate velocity (first derivative) for any feature.
+        Args:
+            feature: Tensor of feature values
+            output_fps: Frames per second for calculating time delta
+        Returns:
+            Tensor of same shape as input with calculated velocities
+        """
+        return self.calculate_derivative(feature, output_fps, order=1)
+        
+    def calculate_acceleration(self, feature, output_fps):
+        """
+        Calculate acceleration (second derivative) for any feature.
+        Args:
+            feature: Tensor of feature values
+            output_fps: Frames per second for calculating time delta
+        Returns:
+            Tensor of same shape as input with calculated accelerations
+        """
+        return self.calculate_derivative(feature, output_fps, order=2)
+
     def normalize_features(self, feature, feature_type):
         feature_shape = feature.shape
         feature_flat = feature.reshape(feature_shape[0], -1)
@@ -184,7 +226,8 @@ class Dataset(torch.utils.data.Dataset):
         rotations = self.normalize_features(feature=rotations, feature_type='R')
         scales = self.normalize_features(feature=scales, feature_type='scale')
 
-        velocity = self.calculate_velocity(kps, output_fps)
+        velocity = self.calculate_velocity(exps, output_fps)
+        acceleration = self.calculate_acceleration(exps, output_fps)
         
         # Metadata
         metadata = {
@@ -197,6 +240,7 @@ class Dataset(torch.utils.data.Dataset):
         return {
             'kp': kps,
             'velocity': velocity,
+            'acceleration': acceleration,
             'exp': exps,
             'x_s': x_s,
             't': translations,
