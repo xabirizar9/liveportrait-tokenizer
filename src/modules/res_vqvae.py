@@ -39,6 +39,7 @@ class ResVQVae(VQVae):
                  use_quantization: bool = True,
                  quant_depth=3,
                  commitment_cost=0.25,
+                 use_scaling: bool = True,
                  **kwargs) -> None:
 
         # Initialize parent class with all parameters except use_quantization set to True
@@ -63,6 +64,7 @@ class ResVQVae(VQVae):
         # Residual quantization specific parameters
         self.quant_depth = quant_depth
         self.commitment_cost = commitment_cost
+        self.use_scaling = use_scaling
         
         # Create multiple quantizers, one for each residual layer
         self.quantizers = nn.ModuleList([
@@ -82,6 +84,9 @@ class ResVQVae(VQVae):
         # Encode
         x_encoder = self.encoder(x_in)
 
+        # Apply scaling if enabled
+        if self.use_scaling:
+            x_encoder = x_encoder * self.scale.view(1, -1, 1)
 
         # Apply multi-codebook residual quantization
         z_detached = x_encoder.detach().clone()
@@ -130,6 +135,9 @@ class ResVQVae(VQVae):
         x_in = self.preprocess(features)
         z = self.encoder(x_in)  # encode to latent space
 
+        # Apply scaling if enabled
+        if self.use_scaling:
+            z = z * self.scale.view(1, -1, 1)
 
         # For multi-codebook residual quantization
         z_detached = z.detach().clone()
