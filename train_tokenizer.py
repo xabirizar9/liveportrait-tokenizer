@@ -38,10 +38,12 @@ def collate_fn(batch, max_seq_len=300):
     features_list = []
 
     feats_enabled = {
-        'kp': False,
-        'velocity': True,
-        'exp': True,
-        'acceleration': True,
+        'kp': True,
+        'kp_velocity': False,
+        'kp_acceleration': False,
+        'exp': False,
+        'exp_velocity': False,
+        'exp_acceleration': False,
         'x_s': False,
         't': False,
         'R': False,
@@ -55,15 +57,21 @@ def collate_fn(batch, max_seq_len=300):
         if feats_enabled['kp']:
             kp = sample['kp'].reshape(seq_len, -1)  # [seq_len, 21*3]
             feats.append(kp)
-        if feats_enabled['velocity']:
-            velocity = sample['velocity'].reshape(seq_len, -1)  # [seq_len, 21*3]
-            feats.append(velocity)
-        if feats_enabled['acceleration']:
-            acceleration = sample['acceleration'].reshape(seq_len, -1)  # [seq_len, 21*3]
-            feats.append(acceleration)
+        if feats_enabled['kp_velocity']:
+            kp_velocity = sample['kp_velocity'].reshape(seq_len, -1)  # [seq_len, 21*3]
+            feats.append(kp_velocity)
+        if feats_enabled['kp_acceleration']:
+            kp_acceleration = sample['kp_acceleration'].reshape(seq_len, -1)  # [seq_len, 21*3]
+            feats.append(kp_acceleration)
         if feats_enabled['exp']:
             exp = sample['exp'].reshape(seq_len, -1)  # [seq_len, 21*3]
             feats.append(exp)
+        if feats_enabled['exp_velocity']:
+            exp_velocity = sample['exp_velocity'].reshape(seq_len, -1)  # [seq_len, 21*3]
+            feats.append(exp_velocity)
+        if feats_enabled['exp_acceleration']:
+            exp_acceleration = sample['exp_acceleration'].reshape(seq_len, -1)  # [seq_len, 21*3]
+            feats.append(exp_acceleration)
         if feats_enabled['x_s']:
             x_s = sample['x_s'].reshape(seq_len, -1)  # [seq_len, 21*3]
             feats.append(x_s)
@@ -121,12 +129,14 @@ class VQVAEModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # Get features from batch
         features = batch['features']  # Shape: [batch_size, max_seq_len, feature_dim]
+        # anchor = features[:, 0, :].unsqueeze(1)  # Shape: [batch_size, 1, feature_dim]
+        # features_ = features - anchor
         # Forward pass through VQVAE
         reconstr, commit_loss, perplexity = self.vqvae(features)
-
+        # reconstr += anchor
         # Calculate reconstruction loss (MSE)
         recon_loss = F.smooth_l1_loss(reconstr, features)
-        # velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:126], features[:, :, 63:126])
+        # velocity_loss = F.smooth_l1_loss(reconstr[..., 63:126], features[..., 63:126])
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
@@ -156,13 +166,14 @@ class VQVAEModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         # Get features from batch
         features = batch['features']  # Shape: [batch_size, max_seq_len, feature_dim]
-
+        # anchor = features[:, 0, :].unsqueeze(1)  # Shape: [batch_size, 1, feature_dim]
+        # features_ = features - anchor  # Subtract anchor from every frame
         # Forward pass through VQVAE
         reconstr, commit_loss, perplexity = self.vqvae(features)
-
+        # reconstr += anchor
         # Calculate reconstruction loss (MSE)
         recon_loss = F.smooth_l1_loss(reconstr, features)
-        # velocity_loss = F.smooth_l1_loss(reconstr[:, :, 63:126], features[:, :, 63:126])
+        # velocity_loss = F.smooth_l1_loss(reconstr[..., 63:126], features[..., 63:126])
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
@@ -173,7 +184,7 @@ class VQVAEModule(pl.LightningModule):
         # For validation, we typically want epoch-level statistics only
         self.log('val/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        # self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        # self.log('val/velocity_loss{}', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
 
@@ -181,11 +192,40 @@ class VQVAEModule(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         # Get token usage stats
-        token_usage_stats = self.vqvae.quantizer.get_token_usage_stats()
+        all_stats = {}
         
-        # Log each stat separately instead of the whole dictionary
-        for key, value in token_usage_stats.items():
-            self.log(f'token_stats/{key}', value, sync_dist=True, rank_zero_only=True)
+        # Check if we're using a ResVQVAE (with multiple quantizers) or regular VQVAE
+        if hasattr(self.vqvae, 'quant_depth') and hasattr(self.vqvae, 'quantizers'):
+            # ResVQVAE case with multiple quantizers
+            for i in range(self.vqvae.quant_depth):
+                token_usage_stats = self.vqvae.quantizers[i].get_token_usage_stats()
+                
+                # Store stats for each layer
+                for key, value in token_usage_stats.items():
+                    stat_key = f'token_stats/{key}_layer{i}'
+                    all_stats[stat_key] = value
+                    # Log each stat separately
+                    self.log(stat_key, value, sync_dist=True, rank_zero_only=True)
+            
+            # Calculate and log average stats across all layers
+            unique_tokens = [all_stats[f'token_stats/codebook/unique_tokens_layer{i}'] for i in range(self.vqvae.quant_depth)]
+            usage_percent = [all_stats[f'token_stats/codebook/usage_percent_layer{i}'] for i in range(self.vqvae.quant_depth)]
+            
+            avg_unique_tokens = sum(unique_tokens) / self.vqvae.quant_depth
+            avg_usage_percent = sum(usage_percent) / self.vqvae.quant_depth
+            
+            # Log average stats
+            self.log('token_stats/codebook/avg_unique_tokens', avg_unique_tokens, sync_dist=True, rank_zero_only=True)
+            self.log('token_stats/codebook/avg_usage_percent', avg_usage_percent, sync_dist=True, rank_zero_only=True)
+        
+        elif hasattr(self.vqvae, 'quantizer'):
+            # Regular VQVAE case with a single quantizer
+            token_usage_stats = self.vqvae.quantizer.get_token_usage_stats()
+            
+            # Log stats directly without layer suffix
+            for key, value in token_usage_stats.items():
+                stat_key = f'token_stats/{key}'
+                self.log(stat_key, value, sync_dist=True, rank_zero_only=True)
 
     def configure_optimizers(self):
         # Only optimize VQVAE parameters, not MotionExtractor

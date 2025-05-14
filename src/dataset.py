@@ -61,30 +61,71 @@ class Dataset(torch.utils.data.Dataset):
             'x_s': [],
             't': [],
             'R': [],
-            'scale': []
+            'scale': [],
+            'c_eyes': [],
+            'c_lip': [],
+            'kp_velocity': [],
+            'exp_velocity': [],
+            'kp_acceleration': [],
+            'exp_acceleration': []
         }
 
         print(f"Computing statistics for {len(pickle_paths)} samples")
         
+        # Collect features and calculate derivatives with correct FPS for each pickle
         for pickle_path in pickle_paths:    
             with open(pickle_path, 'rb') as f:
                 data = pickle.load(f)
             
             motion = data['motion']
+            c_eyes_lst = data['c_eyes_lst']
+            c_lip_lst = data['c_lip_lst']
+            fps = data['output_fps']  # Get specific FPS for this pickle
             
-            # Extract keypoints and expressions
-            for m in motion:
-                feature_data['kp'].append(torch.tensor(m['kp']).reshape(-1, 63))
-                feature_data['exp'].append(torch.tensor(m['exp']).reshape(-1, 63))
+            # Extract features for the current pickle
+            current_kp = []
+            current_exp = []
+            
+            # Extract keypoints and expressions for all frames
+            for i, m in enumerate(motion):
+                kp = torch.tensor(m['kp']).reshape(-1, 63)
+                exp = torch.tensor(m['exp']).reshape(-1, 63)
+                
+                current_kp.append(kp)
+                current_exp.append(exp)
+                
+                # Add primary features to the dataset
+                feature_data['kp'].append(kp)
+                feature_data['exp'].append(exp)
                 feature_data['x_s'].append(torch.tensor(m['x_s']).reshape(-1, 63))
                 feature_data['t'].append(torch.tensor(m['t']).reshape(-1, 3))
                 feature_data['R'].append(torch.tensor(m['R']).reshape(-1, 9))
                 feature_data['scale'].append(torch.tensor(m['scale']).reshape(-1, 1))
+                feature_data['c_eyes'].append(torch.tensor(c_eyes_lst[i]).reshape(-1, 2))
+                feature_data['c_lip'].append(torch.tensor(c_lip_lst[i]).reshape(-1, 1))
+            
+            # Stack features for this pickle to maintain temporal relationships
+            stacked_kp = torch.cat(current_kp, dim=0)
+            stacked_exp = torch.cat(current_exp, dim=0)
+            
+            # Calculate derivatives using the correct FPS for this pickle
+            # Velocity
+            kp_velocity = self.calculate_velocity(stacked_kp, fps)
+            exp_velocity = self.calculate_velocity(stacked_exp, fps)
+            feature_data['kp_velocity'].extend(kp_velocity.unbind(0))
+            feature_data['exp_velocity'].extend(exp_velocity.unbind(0))
+            
+            # Acceleration
+            kp_acceleration = self.calculate_acceleration(stacked_kp, fps)
+            exp_acceleration = self.calculate_acceleration(stacked_exp, fps)
+            feature_data['kp_acceleration'].extend(kp_acceleration.unbind(0))
+            feature_data['exp_acceleration'].extend(exp_acceleration.unbind(0))
         
-        # Stack all features by type
+        # Stack all features 
         stacked_features = {}
         for key in feature_data:
-            stacked_features[key] = torch.cat(feature_data[key], dim=0)
+            if feature_data[key]:  # Check that list is not empty
+                stacked_features[key] = torch.stack(feature_data[key])
         
         # Compute statistics for each feature type
         self.mean = {}
@@ -93,6 +134,7 @@ class Dataset(torch.utils.data.Dataset):
         for key in stacked_features:
             self.mean[key] = stacked_features[key].mean(dim=0)
             self.std[key] = stacked_features[key].std(dim=0)
+            # Replace zero standard deviations with ones to avoid division by zero
             self.std[key] = torch.where(self.std[key] == 0, torch.ones_like(self.std[key]), self.std[key])
         
         # Save statistics
@@ -114,7 +156,7 @@ class Dataset(torch.utils.data.Dataset):
         """
         if order < 1:
             return feature
-            
+        
         # Save original shape and flatten to [frames, -1]
         feature_shape = feature.shape
         feature_flat = feature.reshape(feature_shape[0], -1)
@@ -176,22 +218,26 @@ class Dataset(torch.utils.data.Dataset):
         # Map between item keys and feature types
         feature_map = {
             'kp': 'kp',
+            'kp_velocity': 'kp_velocity',
+            'kp_acceleration': 'kp_acceleration',
             'exp': 'exp',
+            'exp_velocity': 'exp_velocity',
+            'exp_acceleration': 'exp_acceleration',
             'x_s': 'x_s',
             't': 't',
             'R': 'R',
-            'scale': 'scale'
+            'scale': 'scale',
+            'c_eyes': 'c_eyes',
+            'c_lip': 'c_lip'
         }
         
         # Denormalize each feature
         for key, feature_type in feature_map.items():
-            if key in result and isinstance(result[key], torch.Tensor):
+            if key in result and isinstance(result[key], torch.Tensor) and feature_type in self.mean and feature_type in self.std:
                 if key == 'scale':
                     result[key] = self.denormalize_features(result[key].reshape(-1, 1), feature_type).squeeze(-1)
                 else:
                     result[key] = self.denormalize_features(result[key], feature_type)
-        
-        # Note: We don't denormalize velocity as it was derived from already normalized data
         
         return result
 
@@ -204,7 +250,7 @@ class Dataset(torch.utils.data.Dataset):
         
         # Extract required data
         n_frames = data['n_frames']
-        output_fps = data['output_fps']
+        output_fps = data['output_fps']  # Use the correct FPS for this pickle
         motion = data['motion']
         c_eyes_lst = data['c_eyes_lst']
         c_lip_lst = data['c_lip_lst']
@@ -219,15 +265,27 @@ class Dataset(torch.utils.data.Dataset):
         c_eyes = torch.stack([torch.tensor(c_eyes_lst[i]).squeeze(0) for i in range(len(c_eyes_lst))])  # Shape: (n_frames, 2)
         c_lip = torch.stack([torch.tensor(c_lip_lst[i]).squeeze(0) for i in range(len(c_lip_lst))])  # Shape: (n_frames, 2)    
 
+        # Calculate velocity and acceleration with the correct FPS
+        kp_velocity = self.calculate_velocity(kps, output_fps)
+        exp_velocity = self.calculate_velocity(exps, output_fps)
+        kp_acceleration = self.calculate_acceleration(kps, output_fps)
+        exp_acceleration = self.calculate_acceleration(exps, output_fps)
+        
+        # Normalize primary features
         kps = self.normalize_features(feature=kps, feature_type='kp')
         exps = self.normalize_features(feature=exps, feature_type='exp')
         x_s = self.normalize_features(feature=x_s, feature_type='x_s')
         translations = self.normalize_features(feature=translations, feature_type='t')
         rotations = self.normalize_features(feature=rotations, feature_type='R')
         scales = self.normalize_features(feature=scales, feature_type='scale')
+        c_eyes = self.normalize_features(feature=c_eyes, feature_type='c_eyes')
+        c_lip = self.normalize_features(feature=c_lip, feature_type='c_lip')
 
-        velocity = self.calculate_velocity(exps, output_fps)
-        acceleration = self.calculate_acceleration(exps, output_fps)
+        # Apply statistics-based normalization to derivatives
+        kp_velocity = self.normalize_features(feature=kp_velocity, feature_type='kp_velocity')
+        kp_acceleration = self.normalize_features(feature=kp_acceleration, feature_type='kp_acceleration')
+        exp_velocity = self.normalize_features(feature=exp_velocity, feature_type='exp_velocity')
+        exp_acceleration = self.normalize_features(feature=exp_acceleration, feature_type='exp_acceleration')
         
         # Metadata
         metadata = {
@@ -239,9 +297,11 @@ class Dataset(torch.utils.data.Dataset):
         # Return the structured data
         return {
             'kp': kps,
-            'velocity': velocity,
-            'acceleration': acceleration,
+            'kp_velocity': kp_velocity,
+            'kp_acceleration': kp_acceleration,
             'exp': exps,
+            'exp_velocity': exp_velocity, 
+            'exp_acceleration': exp_acceleration,
             'x_s': x_s,
             't': translations,
             'R': rotations,
