@@ -22,11 +22,12 @@ from torch.utils.data import DataLoader
 
 
 from src.modules.vqvae import VQVae
+from src.modules.fc_vqvae import FCVQVae
 from src.modules.res_vqvae import ResVQVae
 from src.dataset import Dataset
 
 
-def collate_fn(batch, max_seq_len=300):
+def collate_fn(batch, feats_enabled, max_seq_len=300):
     """
     Custom collate function for batching samples with fixed sequence length
     Args:
@@ -37,53 +38,13 @@ def collate_fn(batch, max_seq_len=300):
     """
     features_list = []
 
-    feats_enabled = {
-        'kp': True,
-        'kp_velocity': False,
-        'kp_acceleration': False,
-        'exp': False,
-        'exp_velocity': False,
-        'exp_acceleration': False,
-        'x_s': False,
-        't': False,
-        'R': False,
-        'scale': False,
-    }
-    
     for sample in batch:
         feats = []
         seq_len = sample['kp'].shape[0]
 
-        if feats_enabled['kp']:
-            kp = sample['kp'].reshape(seq_len, -1)  # [seq_len, 21*3]
-            feats.append(kp)
-        if feats_enabled['kp_velocity']:
-            kp_velocity = sample['kp_velocity'].reshape(seq_len, -1)  # [seq_len, 21*3]
-            feats.append(kp_velocity)
-        if feats_enabled['kp_acceleration']:
-            kp_acceleration = sample['kp_acceleration'].reshape(seq_len, -1)  # [seq_len, 21*3]
-            feats.append(kp_acceleration)
-        if feats_enabled['exp']:
-            exp = sample['exp'].reshape(seq_len, -1)  # [seq_len, 21*3]
-            feats.append(exp)
-        if feats_enabled['exp_velocity']:
-            exp_velocity = sample['exp_velocity'].reshape(seq_len, -1)  # [seq_len, 21*3]
-            feats.append(exp_velocity)
-        if feats_enabled['exp_acceleration']:
-            exp_acceleration = sample['exp_acceleration'].reshape(seq_len, -1)  # [seq_len, 21*3]
-            feats.append(exp_acceleration)
-        if feats_enabled['x_s']:
-            x_s = sample['x_s'].reshape(seq_len, -1)  # [seq_len, 21*3]
-            feats.append(x_s)
-        if feats_enabled['t']:
-            t = sample['t'].reshape(seq_len, -1)  # [seq_len, 3]
-            feats.append(t)
-        if feats_enabled['R']:
-            R = sample['R'].reshape(seq_len, -1)  # [seq_len, 9]
-            feats.append(R)
-        if feats_enabled['scale']:
-            scale = sample['scale'].reshape(seq_len, -1)  # [seq_len, 1]
-            feats.append(scale)
+        for feat in feats_enabled:
+            if feats_enabled[feat]['enabled']:
+                feats.append(sample[feat].reshape(seq_len, -1))
     
         # Concatenate features
         features = torch.cat(feats, dim=1)  # [seq_len, N_feats]
@@ -113,6 +74,7 @@ class VQVAEModule(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
+
         self.vqvae = VQVae(
             # quant_depth=3,
             **vqvae_config)
@@ -134,7 +96,7 @@ class VQVAEModule(pl.LightningModule):
         # Forward pass through VQVAE
         reconstr, commit_loss, perplexity = self.vqvae(features)
         # reconstr += anchor
-        # Calculate reconstruction loss (MSE)
+        # Calculate reconstruction loss
         recon_loss = F.smooth_l1_loss(reconstr, features)
         # velocity_loss = F.smooth_l1_loss(reconstr[..., 63:126], features[..., 63:126])
         # Total loss
@@ -143,7 +105,6 @@ class VQVAEModule(pl.LightningModule):
             # self.losses_config['lambda_velocity'] * velocity_loss + 
             self.losses_config['lambda_commit'] * commit_loss
         )
-
 
         # Log metrics with proper sync_dist setting
         # Main loss metrics - show in progress bar but only log epoch averages to wandb
@@ -171,7 +132,7 @@ class VQVAEModule(pl.LightningModule):
         # Forward pass through VQVAE
         reconstr, commit_loss, perplexity = self.vqvae(features)
         # reconstr += anchor
-        # Calculate reconstruction loss (MSE)
+        # Calculate reconstruction loss
         recon_loss = F.smooth_l1_loss(reconstr, features)
         # velocity_loss = F.smooth_l1_loss(reconstr[..., 63:126], features[..., 63:126])
         # Total loss
@@ -335,8 +296,12 @@ def main(config):
         
     print(f"Loaded {len(train_dataset)} training pickle files and {len(val_dataset)} validation pickle files")
 
+    print("Enabled features: ")
+    for feat in config['feats_enabled']:
+        if config['feats_enabled'][feat]['enabled']:
+            print(feat)
     # Create a collate function with the configured max_seq_len
-    collate_fn_with_max_len = lambda batch: collate_fn(batch, max_seq_len=config['max_seq_len'])
+    collate_fn_with_max_len = lambda batch: collate_fn(batch, feats_enabled=config['feats_enabled'], max_seq_len=config['max_seq_len'])
 
     train_loader = DataLoader(
         train_dataset,
@@ -367,6 +332,13 @@ def main(config):
         warmup_factor=config['lr_scheduler']['warmup_factor'],
         min_lr_factor=config['lr_scheduler']['min_lr_factor']
     )
+
+    pretrained_path = config['vqvae'].get('pretrained_path', None)
+    if pretrained_path is not None:
+        print(f"Loading pretrained weights from {pretrained_path}")
+        weights = torch.load(pretrained_path, map_location='cpu')
+        model.load_state_dict(weights['state_dict'])
+        print(f"Successfully loaded pretrained weights from {pretrained_path}")
 
     # Set up callbacks
     checkpoint_callback = ModelCheckpoint(

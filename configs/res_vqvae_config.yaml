@@ -1,0 +1,52 @@
+# Data parameters
+data_path: "dataset"
+output_path: "outputs"
+run_name: "vqvae-test"
+batch_size: 32
+num_workers: 8
+val_split: 0.1
+seed: 42
+compute_stats: false  # Whether to compute normalization statistics
+max_seq_len: 300  # Maximum sequence length for training
+
+# Training parameters
+max_epochs: 1000
+learning_rate: 2e-5
+check_val_every_n_epoch: 10
+checkpoint_frequency: 10
+log_every_n_steps: 50
+step_log_frequency: 20
+
+# Model parameters
+vqvae:
+  nfeats: 63
+  code_num: 512
+  code_dim: 512
+  output_emb_width: 512
+  down_t: 2
+  stride_t: 2
+  width: 512
+  depth: 3
+  dilation_growth_rate: 3
+  activation: "relu"
+  apply_rotation_trick: true
+  use_quantization: true
+
+losses:
+  lambda_feature: 1.0
+  lambda_velocity: 0.3
+  lambda_commit: 0.02
+
+# Optimizer parameters
+optimizer:
+  type: "adam"
+  betas: [0.9, 0.99]
+  weight_decay: 0.0
+
+# Learning rate scheduler parameters
+lr_scheduler:
+  type: "cosine_decay"  # options: "cosine_decay" or "none"
+  decay_steps: 10000  # total number of steps for cosine decay
+  min_lr_factor: 0.1  # minimum lr will be learning_rate * min_lr_factor 
+  warmup_steps: 100  # number of steps for linear warmup
+  warmup_factor: 0.1  # initial lr factor during warmup (lr will start at learning_rate * warmup_factor)

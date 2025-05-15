@@ -29,7 +29,7 @@ class VQVae(nn.Module):
                  activation: str = "relu",
                  apply_rotation_trick: bool = True,
                  use_quantization: bool = True,
-                 scale_init: float = 0.1,  # Initial scale value
+                 pretrained_path: str = None,
                  **kwargs) -> None:
 
         super().__init__()
@@ -135,7 +135,6 @@ class VQVae(nn.Module):
         x_in = self.preprocess(features)
         x_encoder = self.encoder(x_in) # encode to latent space
         
-        # Apply learnable scaling factor
         x_encoder = self.postprocess(x_encoder) # permutation
         x_encoder = x_encoder.contiguous().view(-1, x_encoder.shape[-1])  # (NT, C)
 
