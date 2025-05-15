@@ -1,0 +1,82 @@
+# Two-Stage VQ-VAE Configuration
+
+# Run name and output path
+run_name: "two_stage_vqvae"
+output_path: "outputs/"
+data_path: "dataset"
+
+# Data parameters
+batch_size: 32
+max_seq_len: 300  # Maximum sequence length for features
+val_split: 0.1
+seed: 42
+num_workers: 8
+compute_stats: false
+
+# KMeans configuration
+centroids_path: null  # Path to pre-computed centroids file. If null, will compute and save to run directory
+
+# Features to use (enable/disable as needed)
+feats_enabled:
+  kp:
+    enabled: false
+  kp_velocity:
+    enabled: false
+  kp_acceleration:
+    enabled: false
+  exp:
+    enabled: true
+  exp_velocity:
+    enabled: false
+  exp_acceleration:
+    enabled: false
+  x_s:
+    enabled: false
+  t:
+    enabled: false
+  R:
+    enabled: false
+  scale:
+    enabled: false
+  c_eyes:
+    enabled: false
+  c_lip:
+    enabled: false
+
+# Training parameters
+stage1_epochs: 200  # Regular VAE training epochs
+stage2_epochs: 200  # VQ-VAE training epochs
+stage1_learning_rate: 1e-4
+stage2_learning_rate: 5e-5
+check_val_every_n_epoch: 10
+checkpoint_frequency: 10
+log_every_n_steps: 50
+step_log_frequency: 20
+
+# Learning rate scheduler
+lr_scheduler:
+  type: "cosine_decay"
+  decay_steps: 100000
+  warmup_steps: 1000
+  warmup_factor: 0.1  # Initial LR = warmup_factor * learning_rate
+  min_lr_factor: 0.1  # Minimum LR = min_lr_factor * learning_rate
+
+# Loss weighting
+losses:
+  lambda_feature: 1.0    # Reconstruction loss weight
+  lambda_commit: 0.02    # Commitment loss weight (for stage 2)
+
+# VQ-VAE model configuration
+vqvae:
+  nfeats: 63
+  code_num: 512
+  code_dim: 512
+  output_emb_width: 512
+  down_t: 2
+  stride_t: 2
+  width: 512
+  depth: 3
+  dilation_growth_rate: 3
+  activation: "relu"
+  apply_rotation_trick: true
+  # pretrained_path: "outputs/20250515_082827-vqvae-exp-lr1e-4-bs32-e1000/checkpoints/checkpoint_epoch=209.ckpt"

@@ -1,13 +1,9 @@
 import torch
 import numpy as np
-import pandas as pd
 import os
 import pytorch_lightning as pl
 import wandb
 import yaml
-import signal
-import sys
-
 import torch.nn.functional as F
 import torch.distributed
 
@@ -20,66 +16,127 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader
 
-
 from src.modules.vqvae import VQVae
-from src.modules.fc_vqvae import FCVQVae
-from src.modules.res_vqvae import ResVQVae
 from src.dataset import Dataset
 from src.data_collator import collate_fn
 
 
-class VQVAEModule(pl.LightningModule):
-    def __init__(self, vqvae_config, losses_config, lr=1e-4,
+
+class VQVAEStage2Module(pl.LightningModule):
+    """Stage 2: Train VQ-VAE with frozen encoder and KMeans codebook initialization"""
+    def __init__(self, vqvae_config, losses_config, lr=5e-5,
                  lr_scheduler='cosine_decay', decay_steps=100000,
-                 warmup_steps=1000, warmup_factor=0.1, min_lr_factor=0.1):
+                 warmup_steps=1000, warmup_factor=0.1, min_lr_factor=0.1,
+                 centroids_path=None):
         super().__init__()
         self.save_hyperparameters()
-
-
-        self.vqvae = VQVae(
-            # quant_depth=3,
-            **vqvae_config)
+        
+        # Create VQVAE with quantization enabled
+        self.vqvae = VQVae(**vqvae_config)
+        
+        # Enable quantization for stage 2
+        if not self.vqvae.use_quantization:
+            self.vqvae.enable_quantization()
+        
+        # Freeze encoder
+        self.vqvae.freeze_encoder()
+        
+        self.centroids_path = centroids_path
+        self.kmeans_initialized = False
         self.losses_config = losses_config
-
+        
         # Ensure learning rate is a float
         self.lr = float(lr)
         self.lr_scheduler = lr_scheduler
         self.decay_steps = decay_steps
         self.warmup_steps = warmup_steps
-        self.warmup_factor = warmup_factor  # Initial LR multiplier during warmup
-        self.min_lr_factor = min_lr_factor  # Minimum LR multiplier after decay
+        self.warmup_factor = warmup_factor
+        self.min_lr_factor = min_lr_factor
+
+    def on_train_start(self):
+        # Skip if already initialized
+        if self.kmeans_initialized:
+            return
+        
+        # If centroids_path is provided and exists, load centroids from file
+        if self.centroids_path is not None and os.path.exists(self.centroids_path):
+            # For distributed training, only log from rank 0
+            if self.trainer.is_global_zero:
+                print(f"Loading centroids from {self.centroids_path}")
+            
+            # Load centroids on all ranks
+            centroids = torch.load(self.centroids_path, map_location=self.device)
+            
+            # Initialize codebook with loaded centroids
+            self.vqvae.quantizer.init_codebook_with_centroids(centroids)
+            self.kmeans_initialized = True
+            
+            if self.trainer.is_global_zero:
+                print("Codebook initialized with pre-computed centroids")
+        else:
+            # For distributed training, compute centroids only on rank 0
+            if self.trainer.is_global_zero:
+                print("Initializing codebook with KMeans clustering...")
+                
+                # Get the training dataloader for KMeans initialization
+                train_dataloader = self.trainer.train_dataloader
+                
+                # Initialize codebook with KMeans
+                _, centroids = self.vqvae.initialize_codebook_kmeans(
+                    train_dataloader,
+                    device=self.device,
+                    return_centroids=True
+                )
+                
+                # Save the centroids to a file if centroids_path is provided
+                if self.centroids_path is not None:
+                    centroids_dir = os.path.dirname(self.centroids_path)
+                    if centroids_dir and not os.path.exists(centroids_dir):
+                        os.makedirs(centroids_dir, exist_ok=True)
+                    torch.save(centroids, self.centroids_path)
+                    print(f"Saved centroids to {self.centroids_path}")
+                
+                print("KMeans initialization complete!")
+            
+            # Wait for rank 0 to finish computing centroids
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+            
+            # Non-root processes load the centroids computed by rank 0
+            if not self.trainer.is_global_zero and self.centroids_path is not None:
+                centroids = torch.load(self.centroids_path, map_location=self.device)
+                self.vqvae.quantizer.init_codebook_with_centroids(centroids)
+                print(f"Rank {self.trainer.global_rank} loaded centroids from {self.centroids_path}")
+            
+            self.kmeans_initialized = True
+        
+        # Ensure all processes have initialized the codebook before proceeding
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
     def training_step(self, batch, batch_idx):
         # Get features from batch
-        features = batch['features']  # Shape: [batch_size, max_seq_len, feature_dim]
-        features = features[..., 30:40]
-        # anchor = features[:, 0, :].unsqueeze(1)  # Shape: [batch_size, 1, feature_dim]
-        # features_ = features - anchor
-        # Forward pass through VQVAE
+        features = batch['features']
+        
+        # Forward pass through VQVAE with quantization
         reconstr, commit_loss, perplexity = self.vqvae(features)
-        # reconstr += anchor
+        
         # Calculate reconstruction loss
         recon_loss = F.smooth_l1_loss(reconstr, features)
-        # velocity_loss = F.smooth_l1_loss(reconstr[..., 63:126], features[..., 63:126])
-        # Total loss
+        
+        # Total loss (includes commitment loss)
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            # self.losses_config['lambda_velocity'] * velocity_loss + 
             self.losses_config['lambda_commit'] * commit_loss
         )
-
-        # Log metrics with proper sync_dist setting
-        # Main loss metrics - show in progress bar but only log epoch averages to wandb
-        self.log('train/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        # self.log('train/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         
-        # Detailed component losses - only log epoch averages to wandb
+        # Log metrics
+        self.log('train/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('train/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('train/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('train/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         
-        # If you want more frequent logging for specific metrics, use logging_interval
-        # Log learning rate at regular intervals (every N steps based on trainer.log_every_n_steps)
+        # Log learning rate at regular intervals
         if batch_idx % self.trainer.log_every_n_steps == 0:
             current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
             self.log('train/learning_rate', current_lr, sync_dist=True, rank_zero_only=True)
@@ -88,27 +145,23 @@ class VQVAEModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         # Get features from batch
-        features = batch['features']  # Shape: [batch_size, max_seq_len, feature_dim]
-        features = features[..., 30:40]
-        # anchor = features[:, 0, :].unsqueeze(1)  # Shape: [batch_size, 1, feature_dim]
-        # features_ = features - anchor  # Subtract anchor from every frame
-        # Forward pass through VQVAE
+        features = batch['features']
+        
+        # Forward pass through VQVAE with quantization
         reconstr, commit_loss, perplexity = self.vqvae(features)
-        # reconstr += anchor
+        
         # Calculate reconstruction loss
         recon_loss = F.smooth_l1_loss(reconstr, features)
-        # velocity_loss = F.smooth_l1_loss(reconstr[..., 63:126], features[..., 63:126])
-        # Total loss
+        
+        # Total loss (includes commitment loss)
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            # self.losses_config['lambda_velocity'] * velocity_loss + 
             self.losses_config['lambda_commit'] * commit_loss
         )
-
-        # For validation, we typically want epoch-level statistics only
+        
+        # Log metrics
         self.log('val/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        # self.log('val/velocity_loss{}', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         self.log('val/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
 
@@ -116,45 +169,20 @@ class VQVAEModule(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         # Get token usage stats
-        all_stats = {}
-        
-        # Check if we're using a ResVQVAE (with multiple quantizers) or regular VQVAE
-        if hasattr(self.vqvae, 'quant_depth') and hasattr(self.vqvae, 'quantizers'):
-            # ResVQVAE case with multiple quantizers
-            for i in range(self.vqvae.quant_depth):
-                token_usage_stats = self.vqvae.quantizers[i].get_token_usage_stats()
-                
-                # Store stats for each layer
-                for key, value in token_usage_stats.items():
-                    stat_key = f'token_stats/{key}_layer{i}'
-                    all_stats[stat_key] = value
-                    # Log each stat separately
-                    self.log(stat_key, value, sync_dist=True, rank_zero_only=True)
-            
-            # Calculate and log average stats across all layers
-            unique_tokens = [all_stats[f'token_stats/codebook/unique_tokens_layer{i}'] for i in range(self.vqvae.quant_depth)]
-            usage_percent = [all_stats[f'token_stats/codebook/usage_percent_layer{i}'] for i in range(self.vqvae.quant_depth)]
-            
-            avg_unique_tokens = sum(unique_tokens) / self.vqvae.quant_depth
-            avg_usage_percent = sum(usage_percent) / self.vqvae.quant_depth
-            
-            # Log average stats
-            self.log('token_stats/codebook/avg_unique_tokens', avg_unique_tokens, sync_dist=True, rank_zero_only=True)
-            self.log('token_stats/codebook/avg_usage_percent', avg_usage_percent, sync_dist=True, rank_zero_only=True)
-        
-        elif hasattr(self.vqvae, 'quantizer'):
-            # Regular VQVAE case with a single quantizer
+        if hasattr(self.vqvae, 'quantizer'):
             token_usage_stats = self.vqvae.quantizer.get_token_usage_stats()
             
-            # Log stats directly without layer suffix
+            # Log stats
             for key, value in token_usage_stats.items():
                 stat_key = f'token_stats/{key}'
                 self.log(stat_key, value, sync_dist=True, rank_zero_only=True)
 
     def configure_optimizers(self):
-        # Only optimize VQVAE parameters, not MotionExtractor
+        # Only optimize decoder and quantizer parameters, not encoder
+        trainable_params = list(self.vqvae.decoder.parameters()) + list(self.vqvae.quantizer.parameters())
+        
         optimizer = torch.optim.Adam(
-            self.vqvae.parameters(),
+            trainable_params,
             lr=self.lr,
             betas=(0.9, 0.99),
             weight_decay=0.0
@@ -197,44 +225,62 @@ def load_config(config_path):
     return config
 
 
-def main(config):
+def main(args):
+    # Set precision
     torch.set_float32_matmul_precision('medium')
 
-    # Determine if this is the main process for distributed training
-    is_main_process = (torch.cuda.is_available() and 
-                      len(os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')) > 1 and
-                      os.environ.get('LOCAL_RANK', '0') == '0') or True
+    # Load configuration
+    config = load_config(args.config)
+    
+    # Convert string paths to Path objects
+    config['data_path'] = Path(config['data_path'])
+    config['output_path'] = Path(config['output_path'])
+    
+    # Override config with command line arguments if provided
+    if args.pretrained_path:
+        config['vqvae']['pretrained_path'] = args.pretrained_path
+    if args.centroids_path:
+        centroids_path = args.centroids_path
+    else:
+        centroids_path = None
 
+    # Determine if this is the main process for distributed training
+    is_global_zero = (torch.cuda.is_available() and 
+                    len(os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')) > 1 and
+                    os.environ.get('LOCAL_RANK', '0') == '0') or True
+    
     # Compose a concise run name
     lr_str = f"lr{config['learning_rate']}".replace('.', 'p')
     bs_str = f"bs{config['batch_size']}"
     epochs_str = f"e{config['max_epochs']}"
     cur_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    run_name = f"{cur_time}-{config['run_name']}-{lr_str}-{bs_str}-{epochs_str}"
+    run_name = f"{cur_time}-stage2-{config.get('run_name', 'vqvae')}-{lr_str}-{bs_str}-{epochs_str}"
 
     # Create run-specific directory structure
     run_dir = Path(config['output_path']) / run_name
     checkpoints_dir = run_dir / 'checkpoints'
     
+    # Create directories (only on main process)
+    if is_global_zero:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        checkpoints_dir.mkdir(exist_ok=True)
 
+    # Initialize wandb (only on main process)
     logger = None
-    if is_main_process:
+    if is_global_zero:
         logger = WandbLogger(
-            project="liveportrait-tokenizer",
+            project="liveportrait-tokenizer-stage2",
             name=run_name,
             config=config,
             log_model=False,
             save_dir=str(run_dir)
         )
         logger.log_hyperparams(config)
-        pprint(f"Config: \n{config}")
-
+        print(f"Stage 2 Config: \n{config}")
 
     # Set up data
-    # Get compute_stats from config, default to True if not specified
     compute_stats = config.get('compute_stats', True)
-    # Create train dataset with normalization stats computation
     train_dataset = Dataset(
         config['data_path'], 
         split='train', 
@@ -243,13 +289,12 @@ def main(config):
         compute_stats=compute_stats
     )
     
-    # Create validation dataset, reusing the statistics from training set
     val_dataset = Dataset(
         config['data_path'], 
         split='val', 
         val_split=config['val_split'], 
         seed=config['seed'],
-        compute_stats=False  # Don't compute stats for validation set
+        compute_stats=False
     )
     
     # If train dataset has computed stats, copy them to val dataset
@@ -257,12 +302,8 @@ def main(config):
         val_dataset.mean = train_dataset.mean
         val_dataset.std = train_dataset.std
         
-    print(f"Loaded {len(train_dataset)} training pickle files and {len(val_dataset)} validation pickle files")
+    print(f"Loaded {len(train_dataset)} training samples and {len(val_dataset)} validation samples")
 
-    print("Enabled features: ")
-    for feat in config['feats_enabled']:
-        if config['feats_enabled'][feat]['enabled']:
-            print(feat)
     # Create a collate function with the configured max_seq_len
     collate_fn_with_max_len = lambda batch: collate_fn(batch, feats_enabled=config['feats_enabled'], max_seq_len=config['max_seq_len'])
 
@@ -284,8 +325,8 @@ def main(config):
         collate_fn=collate_fn_with_max_len
     )
 
-    # Set up model
-    model = VQVAEModule(
+    # Set up stage 2 model
+    model = VQVAEStage2Module(
         vqvae_config=config['vqvae'],
         losses_config=config['losses'],
         lr=config['learning_rate'],
@@ -293,32 +334,45 @@ def main(config):
         decay_steps=config['lr_scheduler']['decay_steps'],
         warmup_steps=config['lr_scheduler']['warmup_steps'],
         warmup_factor=config['lr_scheduler']['warmup_factor'],
-        min_lr_factor=config['lr_scheduler']['min_lr_factor']
+        min_lr_factor=config['lr_scheduler']['min_lr_factor'],
+        centroids_path=centroids_path
     )
 
+    # Load pretrained model if specified
     pretrained_path = config['vqvae'].get('pretrained_path', None)
-    if pretrained_path is not None:
-        print(f"Loading pretrained weights from {pretrained_path}")
-        weights = torch.load(pretrained_path, map_location='cpu')
-        model.load_state_dict(weights['state_dict'])
-        print(f"Successfully loaded pretrained weights from {pretrained_path}")
+    if pretrained_path:
+        print(f"Loading pretrained model from {pretrained_path}")
+        state_dict = torch.load(pretrained_path, map_location='cpu')
+        
+        # Handle different types of saved state dicts
+        if isinstance(state_dict, dict) and 'state_dict' in state_dict:
+            # If it's a checkpoint with 'state_dict' key
+            state_dict = state_dict['state_dict']
+            
+            # If keys have 'vqvae.' prefix, remove it to match model keys
+            if all(k.startswith('vqvae.') for k in state_dict.keys()):
+                state_dict = {k[6:]: v for k, v in state_dict.items()}
+        
+        # Load weights
+        missing, unexpected = model.vqvae.load_state_dict(state_dict, strict=False)
+        print(f"Loaded pretrained weights. Missing keys: {missing}, Unexpected keys: {unexpected}")
 
     # Set up callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath=str(checkpoints_dir),
-        filename='checkpoint_{epoch:03d}',
-        save_top_k=5,  # Save all checkpoints
+        filename='stage2-checkpoint_{epoch:03d}',
+        save_top_k=5,
         monitor='val/loss',
-        every_n_epochs=config['checkpoint_frequency'],  # Use checkpoint frequency from config
+        every_n_epochs=config.get('checkpoint_frequency', 5),
         mode='min',
-        save_weights_only=True,  # Only save model weights
-        save_last=True,  # Don't save last checkpoint
-        save_on_train_epoch_end=False,  # Only save on validation
+        save_weights_only=True,
+        save_last=True,
+        save_on_train_epoch_end=False,
     )
 
     callbacks = [checkpoint_callback]
 
-    # Set up trainer with proper distributed training settings
+    # Set up trainer
     trainer = pl.Trainer(
         max_epochs=config['max_epochs'],
         callbacks=callbacks,
@@ -327,13 +381,13 @@ def main(config):
         devices="auto",
         strategy="ddp",
         precision="bf16-mixed",
-        default_root_dir=str(run_dir),  # Set the root directory for the run
+        default_root_dir=str(run_dir),
         accumulate_grad_batches=1,
-        log_every_n_steps=config['log_every_n_steps'],
-        check_val_every_n_epoch=config['check_val_every_n_epoch'],  # Validate only every N epochs
+        log_every_n_steps=config.get('log_every_n_steps', 50),
+        check_val_every_n_epoch=config.get('check_val_every_n_epoch', 1),
         sync_batchnorm=True,
-        enable_progress_bar=is_main_process,
-        enable_model_summary=is_main_process,
+        enable_progress_bar=is_global_zero,
+        enable_model_summary=is_global_zero,
     )
 
     # Train model
@@ -341,38 +395,20 @@ def main(config):
 
     # Save final model
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    final_model_path = str(run_dir / f"final_{timestamp}.pth")
+    final_model_path = str(run_dir / f"stage2_final_{timestamp}.pth")
     if trainer.global_rank == 0:  # Only save on the main process
         # Only save VQVAE parameters
-        model_state = {k: v for k, v in model.state_dict().items() if k.startswith('vqvae.')}
-        # Remove 'vqvae.' prefix from keys
-        model_state = {k[6:]: v for k, v in model_state.items()}
-        torch.save(model_state, final_model_path)
+        torch.save(model.vqvae.state_dict(), final_model_path)
         print(f"Saved final model to {final_model_path}")
 
     wandb.finish()
 
+
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config file")
+    parser.add_argument("--pretrained_path", type=str, help="Path to pretrained VAE model")
+    parser.add_argument("--centroids_path", type=str, help="Path to save/load KMeans centroids")
     args = parser.parse_args()
 
-    # Load configuration
-    config = load_config(args.config)
-    
-    # Convert string paths to Path objects
-    config['data_path'] = Path(config['data_path'])
-    config['output_path'] = Path(config['output_path'])
-
-    main(config)
-
-# python train_tokenizer.py \
-# --data_path dataset \
-# --output_path models \
-# --batch_size 32 \  # Now supports batching with variable sequence lengths
-# --max_seq_len 300 \  # Maximum sequence length (longer sequences will be cropped)
-# --num_workers 4 \
-# --max_epochs 1 \
-# --learning_rate 3e-4 \
-# --lr_scheduler cosine \
-# --warmup_steps 1000
+    main(args) 

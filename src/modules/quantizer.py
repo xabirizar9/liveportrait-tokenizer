@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.cluster import KMeans
 
 class QuantizeEMAReset(nn.Module):
     def __init__(self, nb_code, code_dim, mu):
@@ -37,6 +38,38 @@ class QuantizeEMAReset(nn.Module):
         self.code_sum = self.codebook.clone()
         self.code_count = torch.ones(self.nb_code, device=self.codebook.device)
         self.init = True
+        
+    @torch.no_grad()
+    def init_codebook_kmeans(self, encoded_vectors):
+        """
+        Initialize the codebook using KMeans clustering on a batch of encoded vectors.
+        
+        Args:
+            encoded_vectors (Tensor): Tensor of shape [N, code_dim] containing encoded vectors
+                                     from the encoder to cluster.
+        """
+        # Convert to numpy for KMeans
+        vectors_np = encoded_vectors.detach().cpu().numpy()
+        
+        # Apply KMeans clustering
+        kmeans = KMeans(n_clusters=self.nb_code, n_init=10, random_state=42)
+        kmeans.fit(vectors_np)
+        
+        # Get the centroids
+        centroids = kmeans.cluster_centers_
+        
+        # Convert back to tensor and move to device
+        centroids_tensor = torch.tensor(centroids, dtype=torch.float32, device=encoded_vectors.device)
+        
+        # Initialize codebook with KMeans centroids
+        self.codebook = centroids_tensor
+        self.code_sum = self.codebook.clone()
+        self.code_count = torch.ones(self.nb_code, device=self.codebook.device)
+        self.init = True
+        
+        print(f"Codebook initialized with KMeans clustering to {self.nb_code} centroids")
+        
+        return kmeans.inertia_  # Return the inertia (sum of squared distances)
 
     @torch.no_grad()
     def compute_perplexity(self, code_idx) :
@@ -148,3 +181,23 @@ class QuantizeEMAReset(nn.Module):
         x_d = x_d.view(N, T, -1).permute(0, 2, 1).contiguous()   #(N, DIM, T)
 
         return x_d, commit_loss, perplexity
+
+    @torch.no_grad()
+    def init_codebook_with_centroids(self, centroids):
+        """
+        Initialize the codebook with pre-computed centroids.
+        
+        Args:
+            centroids (Tensor): Pre-computed centroids tensor of shape [nb_code, code_dim]
+        """
+        if centroids.shape[0] != self.nb_code or centroids.shape[1] != self.code_dim:
+            raise ValueError(f"Centroids shape {centroids.shape} doesn't match codebook shape ({self.nb_code}, {self.code_dim})")
+            
+        # Set codebook to pre-computed centroids
+        self.codebook = centroids
+        self.code_sum = self.codebook.clone()
+        self.code_count = torch.ones(self.nb_code, device=self.codebook.device)
+        self.init = True
+        
+        print(f"Codebook initialized with pre-computed centroids")
+        return True

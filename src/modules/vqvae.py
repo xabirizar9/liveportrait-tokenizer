@@ -1,6 +1,6 @@
 # Partially from https://github.com/Mael-zys/T2M-GPT
 
-from typing import Union
+from typing import Union, List, Tuple, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -70,6 +70,77 @@ class VQVae(nn.Module):
         # (bs, Jx3, T) ->  (bs, T, Jx3)
         x = x.permute(0, 2, 1)
         return x
+        
+    @torch.no_grad()
+    def initialize_codebook_kmeans(self, dataloader, device='cuda', max_samples=10000,
+                                  return_centroids=False):
+        """
+        Initialize the codebook using KMeans on outputs from the trained encoder.
+        
+        Args:
+            dataloader: DataLoader containing the training data
+            device: Device to run inference on
+            max_samples: Maximum number of samples to use for KMeans
+            return_centroids: Whether to return the centroids
+        """
+        # Ensure we're in eval mode and quantization is disabled
+        was_training = self.training
+        self.eval()
+        
+        # Store original quantization state
+        orig_quant_state = self.use_quantization
+        self.use_quantization = False
+        
+        # Collect encoded vectors
+        encoded_vectors = []
+        sample_count = 0
+        
+        print("Collecting encoder outputs for KMeans clustering...")
+        for batch in dataloader:
+            if isinstance(batch, dict):
+                features = batch['features'].to(device)
+            else:
+                features = batch.to(device)
+                
+            # Forward pass through encoder only
+            N, T, _ = features.shape
+            x_in = self.preprocess(features)
+            x_encoder = self.encoder(x_in)
+            
+            # Flatten to (N*T, C) for clustering
+            x_flat = x_encoder.permute(0, 2, 1).contiguous().view(-1, x_encoder.shape[1])
+            
+            encoded_vectors.append(x_flat)
+            
+            sample_count += x_flat.shape[0]
+            if sample_count >= max_samples:
+                break
+                
+        # Concatenate all collected vectors
+        all_vectors = torch.cat(encoded_vectors, dim=0)
+        
+        # Use a subset if too many samples
+        if all_vectors.shape[0] > max_samples:
+            # Random sampling for KMeans
+            indices = torch.randperm(all_vectors.shape[0])[:max_samples]
+            all_vectors = all_vectors[indices]
+            
+        print(f"Collected {all_vectors.shape[0]} vectors for KMeans clustering")
+        
+        # Initialize codebook using KMeans
+        inertia = self.quantizer.init_codebook_kmeans(all_vectors)
+        
+        # Restore original states
+        if was_training:
+            self.train()
+        self.use_quantization = orig_quant_state
+        
+        print(f"Codebook initialization complete. KMeans inertia: {inertia:.4f}")
+        
+        if return_centroids:
+            return inertia, self.quantizer.codebook
+        else:
+            return inertia
 
     def forward(self, features: Tensor):
         # Preprocess
@@ -125,6 +196,27 @@ class VQVae(nn.Module):
 
         return x_out, commit_loss, perplexity
 
+    def freeze_encoder(self):
+        """Freeze the encoder parameters for stage 2 training"""
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+        print("Encoder parameters frozen")
+        
+    def unfreeze_encoder(self):
+        """Unfreeze the encoder parameters if needed"""
+        for param in self.encoder.parameters():
+            param.requires_grad = True
+        print("Encoder parameters unfrozen")
+        
+    def enable_quantization(self):
+        """Enable VQ for stage 2 training"""
+        self.use_quantization = True
+        print("Quantization enabled")
+        
+    def disable_quantization(self):
+        """Disable VQ for stage 1 training"""
+        self.use_quantization = False
+        print("Quantization disabled")
 
     def encode(
         self,
