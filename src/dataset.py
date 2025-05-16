@@ -62,8 +62,8 @@ class Dataset(torch.utils.data.Dataset):
             't': [],
             'R': [],
             'scale': [],
-            'c_eyes': [],
-            'c_lip': [],
+            'c_eyes_lst': [],
+            'c_lip_lst': [],
             'kp_velocity': [],
             'exp_velocity': [],
             'kp_acceleration': [],
@@ -101,8 +101,8 @@ class Dataset(torch.utils.data.Dataset):
                 feature_data['t'].append(torch.tensor(m['t']).reshape(-1, 3))
                 feature_data['R'].append(torch.tensor(m['R']).reshape(-1, 9))
                 feature_data['scale'].append(torch.tensor(m['scale']).reshape(-1, 1))
-                feature_data['c_eyes'].append(torch.tensor(c_eyes_lst[i]).reshape(-1, 2))
-                feature_data['c_lip'].append(torch.tensor(c_lip_lst[i]).reshape(-1, 1))
+                feature_data['c_eyes_lst'].append(torch.tensor(c_eyes_lst[i]).reshape(-1, 2))
+                feature_data['c_lip_lst'].append(torch.tensor(c_lip_lst[i]).reshape(-1, 1))
             
             # Stack features for this pickle to maintain temporal relationships
             stacked_kp = torch.cat(current_kp, dim=0)
@@ -227,8 +227,8 @@ class Dataset(torch.utils.data.Dataset):
             't': 't',
             'R': 'R',
             'scale': 'scale',
-            'c_eyes': 'c_eyes',
-            'c_lip': 'c_lip'
+            'c_eyes_lst': 'c_eyes_lst',
+            'c_lip_lst': 'c_lip_lst'
         }
         
         # Denormalize each feature
@@ -262,8 +262,8 @@ class Dataset(torch.utils.data.Dataset):
         translations = torch.stack([torch.tensor(m['t']) for m in motion])  # Shape: (n_frames, 1, 3)
         rotations = torch.stack([torch.tensor(m['R']) for m in motion])  # Shape: (n_frames, 3, 3)
         scales = torch.stack([torch.tensor(m['scale']) for m in motion])  # Shape: (n_frames,)
-        c_eyes = torch.stack([torch.tensor(c_eyes_lst[i]).squeeze(0) for i in range(len(c_eyes_lst))])  # Shape: (n_frames, 2)
-        c_lip = torch.stack([torch.tensor(c_lip_lst[i]).squeeze(0) for i in range(len(c_lip_lst))])  # Shape: (n_frames, 2)    
+        c_eyes_lst = torch.stack([torch.tensor(c_eyes_lst[i]).squeeze(0) for i in range(len(c_eyes_lst))])  # Shape: (n_frames, 2)
+        c_lip_lst = torch.stack([torch.tensor(c_lip_lst[i]).squeeze(0) for i in range(len(c_lip_lst))])  # Shape: (n_frames, 1)    
 
         # Calculate velocity and acceleration with the correct FPS
         kp_velocity = self.calculate_velocity(kps, output_fps)
@@ -278,8 +278,8 @@ class Dataset(torch.utils.data.Dataset):
         translations = self.normalize_features(feature=translations, feature_type='t')
         rotations = self.normalize_features(feature=rotations, feature_type='R')
         scales = self.normalize_features(feature=scales, feature_type='scale')
-        c_eyes = self.normalize_features(feature=c_eyes, feature_type='c_eyes')
-        c_lip = self.normalize_features(feature=c_lip, feature_type='c_lip')
+        c_eyes_lst = self.normalize_features(feature=c_eyes_lst, feature_type='c_eyes_lst')
+        c_lip_lst = self.normalize_features(feature=c_lip_lst, feature_type='c_lip_lst')
 
         # Apply statistics-based normalization to derivatives
         kp_velocity = self.normalize_features(feature=kp_velocity, feature_type='kp_velocity')
@@ -306,8 +306,8 @@ class Dataset(torch.utils.data.Dataset):
             't': translations,
             'R': rotations,
             'scale': scales,
-            'c_eyes_lst': c_eyes,
-            'c_lip_lst': c_lip,
+            'c_eyes_lst': c_eyes_lst,
+            'c_lip_lst': c_lip_lst,
             'metadata': metadata
         }
 

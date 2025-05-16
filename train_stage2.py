@@ -21,13 +21,11 @@ from src.dataset import Dataset
 from src.data_collator import collate_fn
 
 
-
 class VQVAEStage2Module(pl.LightningModule):
-    """Stage 2: Train VQ-VAE with frozen encoder and KMeans codebook initialization"""
+    """Stage 2: Train VQ-VAE with frozen encoder and statistics-based codebook initialization"""
     def __init__(self, vqvae_config, losses_config, lr=5e-5,
                  lr_scheduler='cosine_decay', decay_steps=100000,
-                 warmup_steps=1000, warmup_factor=0.1, min_lr_factor=0.1,
-                 centroids_path=None):
+                 warmup_steps=1000, warmup_factor=0.1, min_lr_factor=0.1):
         super().__init__()
         self.save_hyperparameters()
         
@@ -37,12 +35,8 @@ class VQVAEStage2Module(pl.LightningModule):
         # Enable quantization for stage 2
         if not self.vqvae.use_quantization:
             self.vqvae.enable_quantization()
-        
-        # Freeze encoder
-        self.vqvae.freeze_encoder()
-        
-        self.centroids_path = centroids_path
-        self.kmeans_initialized = False
+                
+        self.codebook_initialized = False
         self.losses_config = losses_config
         
         # Ensure learning rate is a float
@@ -55,60 +49,26 @@ class VQVAEStage2Module(pl.LightningModule):
 
     def on_train_start(self):
         # Skip if already initialized
-        if self.kmeans_initialized:
+        if self.codebook_initialized:
             return
+            
+        # For distributed training, synchronize initialization
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+            
+        # Initialize the codebook with statistics
+        print("Initializing codebook with training set statistics...")
         
-        # If centroids_path is provided and exists, load centroids from file
-        if self.centroids_path is not None and os.path.exists(self.centroids_path):
-            # For distributed training, only log from rank 0
-            if self.trainer.is_global_zero:
-                print(f"Loading centroids from {self.centroids_path}")
-            
-            # Load centroids on all ranks
-            centroids = torch.load(self.centroids_path, map_location=self.device)
-            
-            # Initialize codebook with loaded centroids
-            self.vqvae.quantizer.init_codebook_with_centroids(centroids)
-            self.kmeans_initialized = True
-            
-            if self.trainer.is_global_zero:
-                print("Codebook initialized with pre-computed centroids")
-        else:
-            # For distributed training, compute centroids only on rank 0
-            if self.trainer.is_global_zero:
-                print("Initializing codebook with KMeans clustering...")
-                
-                # Get the training dataloader for KMeans initialization
-                train_dataloader = self.trainer.train_dataloader
-                
-                # Initialize codebook with KMeans
-                _, centroids = self.vqvae.initialize_codebook_kmeans(
-                    train_dataloader,
-                    device=self.device,
-                    return_centroids=True
-                )
-                
-                # Save the centroids to a file if centroids_path is provided
-                if self.centroids_path is not None:
-                    centroids_dir = os.path.dirname(self.centroids_path)
-                    if centroids_dir and not os.path.exists(centroids_dir):
-                        os.makedirs(centroids_dir, exist_ok=True)
-                    torch.save(centroids, self.centroids_path)
-                    print(f"Saved centroids to {self.centroids_path}")
-                
-                print("KMeans initialization complete!")
-            
-            # Wait for rank 0 to finish computing centroids
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            
-            # Non-root processes load the centroids computed by rank 0
-            if not self.trainer.is_global_zero and self.centroids_path is not None:
-                centroids = torch.load(self.centroids_path, map_location=self.device)
-                self.vqvae.quantizer.init_codebook_with_centroids(centroids)
-                print(f"Rank {self.trainer.global_rank} loaded centroids from {self.centroids_path}")
-            
-            self.kmeans_initialized = True
+        # Get the training dataloader
+        train_dataloader = self.trainer.train_dataloader
+        
+        # Initialize codebook with training set statistics
+        self.vqvae.initialize_codebook_with_stats(
+            train_dataloader,
+            device=self.device
+        )
+        
+        self.codebook_initialized = True
         
         # Ensure all processes have initialized the codebook before proceeding
         if torch.distributed.is_initialized():
@@ -236,13 +196,6 @@ def main(args):
     config['data_path'] = Path(config['data_path'])
     config['output_path'] = Path(config['output_path'])
     
-    # Override config with command line arguments if provided
-    if args.pretrained_path:
-        config['vqvae']['pretrained_path'] = args.pretrained_path
-    if args.centroids_path:
-        centroids_path = args.centroids_path
-    else:
-        centroids_path = None
 
     # Determine if this is the main process for distributed training
     is_global_zero = (torch.cuda.is_available() and 
@@ -335,27 +288,21 @@ def main(args):
         warmup_steps=config['lr_scheduler']['warmup_steps'],
         warmup_factor=config['lr_scheduler']['warmup_factor'],
         min_lr_factor=config['lr_scheduler']['min_lr_factor'],
-        centroids_path=centroids_path
     )
 
     # Load pretrained model if specified
     pretrained_path = config['vqvae'].get('pretrained_path', None)
+
     if pretrained_path:
         print(f"Loading pretrained model from {pretrained_path}")
-        state_dict = torch.load(pretrained_path, map_location='cpu')
-        
-        # Handle different types of saved state dicts
-        if isinstance(state_dict, dict) and 'state_dict' in state_dict:
-            # If it's a checkpoint with 'state_dict' key
-            state_dict = state_dict['state_dict']
-            
-            # If keys have 'vqvae.' prefix, remove it to match model keys
-            if all(k.startswith('vqvae.') for k in state_dict.keys()):
-                state_dict = {k[6:]: v for k, v in state_dict.items()}
+        pretrained = torch.load(pretrained_path)
         
         # Load weights
-        missing, unexpected = model.vqvae.load_state_dict(state_dict, strict=False)
+        missing, unexpected = model.load_state_dict(pretrained['state_dict'])
         print(f"Loaded pretrained weights. Missing keys: {missing}, Unexpected keys: {unexpected}")
+    else:
+        print("No pretrained model provided")
+        exit()
 
     # Set up callbacks
     checkpoint_callback = ModelCheckpoint(
@@ -408,7 +355,6 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config file")
     parser.add_argument("--pretrained_path", type=str, help="Path to pretrained VAE model")
-    parser.add_argument("--centroids_path", type=str, help="Path to save/load KMeans centroids")
     args = parser.parse_args()
 
     main(args) 

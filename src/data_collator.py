@@ -15,10 +15,27 @@ def collate_fn(batch, feats_enabled, max_seq_len=300):
     for sample in batch:
         feats = []
         seq_len = sample['kp'].shape[0]
+        dim_ranges = {}
+        
+        # Track the current dimension index
+        current_dim = 0
 
-        for feat in feats_enabled:
-            if feats_enabled[feat]['enabled']:
-                feats.append(sample[feat].reshape(seq_len, -1))
+        for feat in sorted(feats_enabled):
+            is_enabled = feats_enabled[feat]['enabled']
+
+            if is_enabled:
+                # Reshape the feature and get its flattened dimension
+                reshaped_feat = sample[feat].reshape(seq_len, -1)
+                feat_dim = reshaped_feat.shape[1]
+                
+                # Store the dimension range for this feature
+                dim_ranges[feat] = (current_dim, current_dim + feat_dim)
+                
+                # Update the current dimension index
+                current_dim += feat_dim
+                
+                # Add the reshaped feature to the list
+                feats.append(reshaped_feat)
     
         # Concatenate features
         features = torch.cat(feats, dim=1)  # [seq_len, N_feats]
@@ -38,4 +55,4 @@ def collate_fn(batch, feats_enabled, max_seq_len=300):
     # Stack along a new batch dimension
     batched_features = torch.stack(features_list)  # [batch_size, max_seq_len, feature_dim]
     
-    return {'features': batched_features}  # [batch_size, max_seq_len, feature_dim]
+    return {'features': batched_features, "dim_ranges": dim_ranges}  # [batch_size, max_seq_len, feature_dim]

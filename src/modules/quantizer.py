@@ -2,7 +2,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.cluster import KMeans
 
 class QuantizeEMAReset(nn.Module):
     def __init__(self, nb_code, code_dim, mu):
@@ -40,36 +39,35 @@ class QuantizeEMAReset(nn.Module):
         self.init = True
         
     @torch.no_grad()
-    def init_codebook_kmeans(self, encoded_vectors):
+    def init_codebook_with_stats(self, encoded_vectors):
         """
-        Initialize the codebook using KMeans clustering on a batch of encoded vectors.
+        Initialize the codebook using the mean and standard deviation of encoded vectors.
+        This creates a distribution of codes that better reflects the training set.
         
         Args:
             encoded_vectors (Tensor): Tensor of shape [N, code_dim] containing encoded vectors
-                                     from the encoder to cluster.
+                                     from the training set.
         """
-        # Convert to numpy for KMeans
-        vectors_np = encoded_vectors.detach().cpu().numpy()
+        # Calculate mean and std of training set encodings
+        mean = encoded_vectors.mean(dim=0)
+        std = encoded_vectors.std(dim=0)
         
-        # Apply KMeans clustering
-        kmeans = KMeans(n_clusters=self.nb_code, n_init=10, random_state=42)
-        kmeans.fit(vectors_np)
+        # Generate codebook entries based on this distribution
+        device = encoded_vectors.device
+        random_vectors = torch.randn(self.nb_code, self.code_dim, device=device)
         
-        # Get the centroids
-        centroids = kmeans.cluster_centers_
+        # Scale and shift by mean and std to match training set distribution
+        scaled_vectors = random_vectors * std.unsqueeze(0) + mean.unsqueeze(0)
         
-        # Convert back to tensor and move to device
-        centroids_tensor = torch.tensor(centroids, dtype=torch.float32, device=encoded_vectors.device)
-        
-        # Initialize codebook with KMeans centroids
-        self.codebook = centroids_tensor
+        # Initialize codebook with these statistically representative vectors
+        self.codebook = scaled_vectors
         self.code_sum = self.codebook.clone()
         self.code_count = torch.ones(self.nb_code, device=self.codebook.device)
         self.init = True
         
-        print(f"Codebook initialized with KMeans clustering to {self.nb_code} centroids")
+        print(f"Codebook initialized with {self.nb_code} vectors based on training set statistics")
         
-        return kmeans.inertia_  # Return the inertia (sum of squared distances)
+        return True
 
     @torch.no_grad()
     def compute_perplexity(self, code_idx) :
@@ -181,23 +179,3 @@ class QuantizeEMAReset(nn.Module):
         x_d = x_d.view(N, T, -1).permute(0, 2, 1).contiguous()   #(N, DIM, T)
 
         return x_d, commit_loss, perplexity
-
-    @torch.no_grad()
-    def init_codebook_with_centroids(self, centroids):
-        """
-        Initialize the codebook with pre-computed centroids.
-        
-        Args:
-            centroids (Tensor): Pre-computed centroids tensor of shape [nb_code, code_dim]
-        """
-        if centroids.shape[0] != self.nb_code or centroids.shape[1] != self.code_dim:
-            raise ValueError(f"Centroids shape {centroids.shape} doesn't match codebook shape ({self.nb_code}, {self.code_dim})")
-            
-        # Set codebook to pre-computed centroids
-        self.codebook = centroids
-        self.code_sum = self.codebook.clone()
-        self.code_count = torch.ones(self.nb_code, device=self.codebook.device)
-        self.init = True
-        
-        print(f"Codebook initialized with pre-computed centroids")
-        return True
