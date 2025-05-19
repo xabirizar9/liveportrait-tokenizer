@@ -40,7 +40,58 @@ def partial_fields(target_class, kwargs):
     return target_class(**{k: v for k, v in kwargs.items() if hasattr(target_class, k)})
 
 
-class FilteredDataset(torch.utils.data.Dataset):
+class Dataset(torch.utils.data.Dataset):
+    def __init__(self, data_path: str, split: str = 'train', val_split: float = 0.2, seed: int = 42):
+        self.data_path = Path(data_path)
+        self.video_dir = self.data_path / "train"
+        self.split = split
+        self.val_split = val_split
+        self.seed = seed
+
+        self.video_list = pd.read_csv(self.data_path / "videos_by_timestamp.csv")
+        self.video_paths = [self.video_dir / f"{video_id}.mp4" for video_id in self.video_list['original_video_id'].unique()]
+
+        # Split the dataset
+        np.random.seed(seed)
+        indices = np.random.permutation(len(self.video_paths))
+        split_idx = int(len(indices) * (1 - val_split))
+
+        if split == 'train':
+            self.video_paths = [self.video_paths[i] for i in indices[:split_idx]]
+        else:  # val
+            self.video_paths = [self.video_paths[i] for i in indices[split_idx:]]
+
+    def prepare_videos(self, imgs) -> torch.Tensor:
+        """ construct the input as standard
+        imgs: NxBxHxWx3, uint8
+        """
+        N, H, W, C = imgs.shape
+        _imgs = imgs.reshape(N, H, W, C, 1)
+        y = _imgs.astype(np.float32) / 255.
+        y = np.clip(y, 0, 1)  # clip to 0~1
+        y = torch.from_numpy(y).permute(0, 4, 3, 1, 2)  # TxHxWx3x1 -> Tx1x3xHxW
+        return y
+
+    def __getitem__(self, idx):
+        video_path = self.video_paths[idx]
+        video = imageio.get_reader(video_path)
+        fps = video.get_meta_data()['fps']
+        frames = np.array([frame for frame in video])
+        output = self.prepare_videos(frames)
+
+        metadata = {
+            'video_path': str(video_path),
+            'fps': fps
+        }
+
+        return output, metadata
+
+    def __len__(self):
+        return len(self.video_paths)
+
+
+
+class FilteredDataset(Dataset):
     """Wrapper around the base dataset to filter out already processed videos."""
     def __init__(self, base_dataset, output_dir):
         self.base_dataset = base_dataset

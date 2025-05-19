@@ -17,7 +17,7 @@ class Dataset(torch.utils.data.Dataset):
         # Get all pickle files
         all_pickle_paths = list(self.pickle_dir.glob("*.pkl"))
 
-        # Filter filenames with reconstruct in the name
+        # Filter out filenames with reconstruct in the name
         all_pickle_paths = [path for path in all_pickle_paths if "reconstruct" not in path.stem]
         
         # Compute or load statistics for normalization

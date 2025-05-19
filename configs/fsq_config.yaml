@@ -1,0 +1,90 @@
+# Data parameters
+data_path: "dataset"
+output_path: "outputs"
+run_name: "vqvae-vsq"
+batch_size: 32
+num_workers: 8
+val_split: 0.1
+seed: 42
+compute_stats: false  # Whether to compute normalization statistics
+max_seq_len: 300  # Maximum sequence length for training
+
+# Training parameters
+max_epochs: 400
+learning_rate: 1e-4
+check_val_every_n_epoch: 10
+checkpoint_frequency: 10
+log_every_n_steps: 50
+step_log_frequency: 20
+
+feats_enabled:
+  kp:
+    enabled: false
+    shape: [1, 21, 3]
+  kp_velocity:
+    enabled: false
+    shape: [1, 21, 3]
+  kp_acceleration:
+    enabled: false
+    shape: [1, 21, 3]
+  exp:
+    enabled: true
+    shape: [1, 21, 3]
+  exp_velocity:
+    enabled: false
+    shape: [1, 21, 3]
+  exp_acceleration:
+    enabled: false
+    shape: [1, 21, 3]
+  x_s:
+    enabled: false
+    shape: [1, 21, 3]
+  t:
+    enabled: false
+    shape: [1, 3]
+  R:
+    enabled: false
+    shape: [1, 3, 3]
+  scale:
+    enabled: false
+    shape: [1,]
+  c_eyes_lst:
+    enabled: false
+    shape: [1, 2]
+  c_lip_lst:
+    enabled: false
+    shape: [1, 1]
+
+# Model parameters
+vqvae:
+  nfeats: 63
+  levels: [5, 5, 5, 5, 5, 5, 5, 5]
+  output_emb_width: 63
+  down_t: 2
+  stride_t: 1
+  width: 512
+  depth: 3
+  num_quantizers: 1
+  dilation_growth_rate: 3
+  activation: "relu"
+  use_quantization: false
+  # pretrained_path: "outputs/20250516_181903-vae-pretraining-lr1e-4-bs32-e100/checkpoints/checkpoint_epoch=099.ckpt"
+
+losses:
+  lambda_feature: 1.0
+  lambda_velocity: 0.3
+  lambda_commit: 0.02
+
+# Optimizer parameters
+optimizer:
+  type: "adam"
+  betas: [0.9, 0.99]
+  weight_decay: 0.0
+
+# Learning rate scheduler parameters
+lr_scheduler:
+  type: "cosine_decay"  # options: "cosine_decay" or "none"
+  decay_steps: 10000  # total number of steps for cosine decay
+  min_lr_factor: 0.1  # minimum lr will be learning_rate * min_lr_factor 
+  warmup_steps: 100  # number of steps for linear warmup
+  warmup_factor: 0.1  # initial lr factor during warmup (lr will start at learning_rate * warmup_factor)

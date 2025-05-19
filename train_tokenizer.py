@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader
 
 from src.modules.vqvae import VQVae
 from src.modules.fc_vqvae import FCVQVae
+from src.modules.fsq_vqvae import FSQVAE
 from src.modules.res_vqvae import ResVQVae
 from src.dataset import Dataset
 from src.data_collator import collate_fn
@@ -36,7 +37,7 @@ class VQVAEModule(pl.LightningModule):
         self.save_hyperparameters()
 
 
-        self.vqvae = VQVae(
+        self.vqvae = FSQVAE(
             # quant_depth=3,
             **vqvae_config)
         self.losses_config = losses_config
@@ -58,7 +59,7 @@ class VQVAEModule(pl.LightningModule):
 
 
         # Forward pass through VQVAE
-        reconstr, commit_loss, perplexity = self.vqvae(features)
+        reconstr = self.vqvae(features)
 
         # Calculate reconstruction loss
         recon_loss = F.smooth_l1_loss(reconstr, features)
@@ -73,8 +74,8 @@ class VQVAEModule(pl.LightningModule):
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            velocity_loss + 
-            self.losses_config['lambda_commit'] * commit_loss
+            velocity_loss
+            # self.losses_config['lambda_commit'] * commit_loss
         )
 
         # Log metrics with proper sync_dist setting
@@ -86,8 +87,8 @@ class VQVAEModule(pl.LightningModule):
         
         # Detailed component losses - only log epoch averages to wandb
         self.log('train/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        self.log('train/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        self.log('train/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        # self.log('train/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        # self.log('train/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         
         # If you want more frequent logging for specific metrics, use logging_interval
         # Log learning rate at regular intervals (every N steps based on trainer.log_every_n_steps)
@@ -104,7 +105,7 @@ class VQVAEModule(pl.LightningModule):
         velocity_dim_range = batch['dim_ranges'].get('kp_velocity', None)
 
         # Forward pass through VQVAE
-        reconstr, commit_loss, perplexity = self.vqvae(features)
+        reconstr = self.vqvae(features)
         # Calculate reconstruction loss
         recon_loss = F.smooth_l1_loss(reconstr, features)
 
@@ -118,8 +119,8 @@ class VQVAEModule(pl.LightningModule):
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            velocity_loss + 
-            self.losses_config['lambda_commit'] * commit_loss
+            velocity_loss
+            # self.losses_config['lambda_commit'] * commit_loss
         )
 
         # For validation, we typically want epoch-level statistics only
@@ -129,47 +130,47 @@ class VQVAEModule(pl.LightningModule):
         if velocity_dim_range is not None:
             self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         
-        self.log('val/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        self.log('val/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        # self.log('val/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        # self.log('val/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
 
         return total_loss
 
-    def on_validation_epoch_end(self):
-        # Get token usage stats
-        all_stats = {}
+    # def on_validation_epoch_end(self):
+    #     # Get token usage stats
+    #     all_stats = {}
         
-        # Check if we're using a ResVQVAE (with multiple quantizers) or regular VQVAE
-        if hasattr(self.vqvae, 'quant_depth') and hasattr(self.vqvae, 'quantizers'):
-            # ResVQVAE case with multiple quantizers
-            for i in range(self.vqvae.quant_depth):
-                token_usage_stats = self.vqvae.quantizers[i].get_token_usage_stats()
+    #     # Check if we're using a ResVQVAE (with multiple quantizers) or regular VQVAE
+    #     if hasattr(self.vqvae, 'quant_depth') and hasattr(self.vqvae, 'quantizers'):
+    #         # ResVQVAE case with multiple quantizers
+    #         for i in range(self.vqvae.quant_depth):
+    #             # token_usage_stats = self.vqvae.quantizers[i].get_token_usage_stats()
                 
-                # Store stats for each layer
-                for key, value in token_usage_stats.items():
-                    stat_key = f'token_stats/{key}_layer{i}'
-                    all_stats[stat_key] = value
-                    # Log each stat separately
-                    self.log(stat_key, value, sync_dist=True, rank_zero_only=True)
+    #             # Store stats for each layer
+    #             for key, value in token_usage_stats.items():
+    #                 stat_key = f'token_stats/{key}_layer{i}'
+    #                 all_stats[stat_key] = value
+    #                 # Log each stat separately
+    #                 self.log(stat_key, value, sync_dist=True, rank_zero_only=True)
             
-            # Calculate and log average stats across all layers
-            unique_tokens = [all_stats[f'token_stats/codebook/unique_tokens_layer{i}'] for i in range(self.vqvae.quant_depth)]
-            usage_percent = [all_stats[f'token_stats/codebook/usage_percent_layer{i}'] for i in range(self.vqvae.quant_depth)]
+    #         # Calculate and log average stats across all layers
+    #         unique_tokens = [all_stats[f'token_stats/codebook/unique_tokens_layer{i}'] for i in range(self.vqvae.quant_depth)]
+    #         usage_percent = [all_stats[f'token_stats/codebook/usage_percent_layer{i}'] for i in range(self.vqvae.quant_depth)]
             
-            avg_unique_tokens = sum(unique_tokens) / self.vqvae.quant_depth
-            avg_usage_percent = sum(usage_percent) / self.vqvae.quant_depth
+    #         avg_unique_tokens = sum(unique_tokens) / self.vqvae.quant_depth
+    #         avg_usage_percent = sum(usage_percent) / self.vqvae.quant_depth
             
-            # Log average stats
-            self.log('token_stats/codebook/avg_unique_tokens', avg_unique_tokens, sync_dist=True, rank_zero_only=True)
-            self.log('token_stats/codebook/avg_usage_percent', avg_usage_percent, sync_dist=True, rank_zero_only=True)
+    #         # Log average stats
+    #         self.log('token_stats/codebook/avg_unique_tokens', avg_unique_tokens, sync_dist=True, rank_zero_only=True)
+    #         self.log('token_stats/codebook/avg_usage_percent', avg_usage_percent, sync_dist=True, rank_zero_only=True)
         
-        elif hasattr(self.vqvae, 'quantizer'):
-            # Regular VQVAE case with a single quantizer
-            token_usage_stats = self.vqvae.quantizer.get_token_usage_stats()
+    #     elif hasattr(self.vqvae, 'quantizer'):
+    #         # Regular VQVAE case with a single quantizer
+    #         token_usage_stats = self.vqvae.quantizer.get_token_usage_stats()
             
-            # Log stats directly without layer suffix
-            for key, value in token_usage_stats.items():
-                stat_key = f'token_stats/{key}'
-                self.log(stat_key, value, sync_dist=True, rank_zero_only=True)
+    #         # Log stats directly without layer suffix
+    #         for key, value in token_usage_stats.items():
+    #             stat_key = f'token_stats/{key}'
+    #             self.log(stat_key, value, sync_dist=True, rank_zero_only=True)
 
     def configure_optimizers(self):
         # Only optimize VQVAE parameters, not MotionExtractor
