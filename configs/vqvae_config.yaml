@@ -1,8 +1,8 @@
 # Data parameters
 data_path: "dataset"
 output_path: "outputs"
-run_name: "vqvae-stage2"
-batch_size: 32
+run_name: "vqvae-exp-no-down"
+batch_size: 16
 num_workers: 8
 val_split: 0.1
 seed: 42
@@ -10,7 +10,7 @@ compute_stats: false  # Whether to compute normalization statistics
 max_seq_len: 300  # Maximum sequence length for training
 
 # Training parameters
-max_epochs: 200
+max_epochs: 300
 learning_rate: 1e-4
 check_val_every_n_epoch: 10
 checkpoint_frequency: 10
@@ -59,17 +59,17 @@ feats_enabled:
 vqvae:
   nfeats: 63
   code_num: 512
-  code_dim: 1024
-  output_emb_width: 1024
+  code_dim: 512
+  output_emb_width: 512
   down_t: 2
-  stride_t: 2
-  width: 1024
+  stride_t: 1
+  width: 512
   depth: 3
   dilation_growth_rate: 3
   activation: "relu"
   apply_rotation_trick: true
   use_quantization: true
-  pretrained_path: "outputs/20250516_181903-vae-pretraining-lr1e-4-bs32-e100/checkpoints/checkpoint_epoch=099.ckpt"
+  # pretrained_path: "outputs/20250516_181903-vae-pretraining-lr1e-4-bs32-e100/checkpoints/checkpoint_epoch=099.ckpt"
 
 losses:
   lambda_feature: 1.0

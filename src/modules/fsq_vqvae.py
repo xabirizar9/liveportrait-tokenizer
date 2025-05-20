@@ -3,12 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from collections import OrderedDict
 from torch import Tensor, nn
 from torch.distributions.distribution import Distribution
 
-from .resnet import Resnet1D
-from .finite_scalar_quantizer import GroupResidualFSQ
 from .vqvae import Encoder, Decoder
 
 from vector_quantize_pytorch import FSQ, ResidualFSQ
@@ -63,15 +60,17 @@ class FSQVAE(nn.Module):
             norm=norm)
 
         # Use the Group-Residual FSQ quantizer instead of QuantizeEMAReset
+        levels = [levels[0]] * output_emb_width
         print(f"FSQ Config:")
         if use_quantization:
             print(f"Levels: {levels}")
             print(f"Output Emb Width: {output_emb_width}")
             print(f"Num Quantizers: {num_quantizers}")
+
             if num_quantizers == 1:
                 print("Using FSQ")
                 self.quantizer = FSQ(
-                    levels=[levels[0]*output_emb_width],
+                    levels=levels,
                     dim=output_emb_width,
                     preserve_symmetry=True
                 )

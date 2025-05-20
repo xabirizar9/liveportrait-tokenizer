@@ -35,11 +35,13 @@ class VQVAEModule(pl.LightningModule):
                  warmup_steps=1000, warmup_factor=0.1, min_lr_factor=0.1):
         super().__init__()
         self.save_hyperparameters()
-
+        
+        # self.vqvae = VQVae(**vqvae_config)
 
         self.vqvae = FSQVAE(
             # quant_depth=3,
             **vqvae_config)
+
         self.losses_config = losses_config
 
         # Ensure learning rate is a float
@@ -57,6 +59,8 @@ class VQVAEModule(pl.LightningModule):
 
         velocity_dim_range = dim_ranges.get('kp_velocity', None)
 
+        exp_velocity_dim_range = dim_ranges.get('exp_velocity', None)
+
 
         # Forward pass through VQVAE
         reconstr = self.vqvae(features)
@@ -71,10 +75,18 @@ class VQVAEModule(pl.LightningModule):
         else:
             velocity_loss = 0
 
+        if exp_velocity_dim_range is not None:
+            exp_velocity_start, exp_velocity_end = exp_velocity_dim_range
+            exp_velocity_loss = F.smooth_l1_loss(reconstr[..., exp_velocity_start+15:exp_velocity_end], features[..., exp_velocity_start+15:exp_velocity_end])
+            exp_velocity_loss *= self.losses_config['lambda_velocity']
+        else:
+            exp_velocity_loss = 0
+
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            velocity_loss
+            velocity_loss +
+            exp_velocity_loss
             # self.losses_config['lambda_commit'] * commit_loss
         )
 
@@ -85,6 +97,9 @@ class VQVAEModule(pl.LightningModule):
         if velocity_dim_range is not None:
             self.log('train/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         
+        if exp_velocity_dim_range is not None:
+            self.log('train/exp_velocity_loss', exp_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+
         # Detailed component losses - only log epoch averages to wandb
         self.log('train/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         # self.log('train/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
@@ -103,7 +118,7 @@ class VQVAEModule(pl.LightningModule):
         features = batch['features']  # Shape: [batch_size, max_seq_len, feature_dim]
 
         velocity_dim_range = batch['dim_ranges'].get('kp_velocity', None)
-
+        exp_velocity_dim_range = batch['dim_ranges'].get('exp_velocity', None)
         # Forward pass through VQVAE
         reconstr = self.vqvae(features)
         # Calculate reconstruction loss
@@ -116,10 +131,17 @@ class VQVAEModule(pl.LightningModule):
         else:
             velocity_loss = 0
 
+        if exp_velocity_dim_range is not None:
+            exp_velocity_start, exp_velocity_end = exp_velocity_dim_range
+            exp_velocity_loss = F.smooth_l1_loss(reconstr[..., exp_velocity_start+15:exp_velocity_end], features[..., exp_velocity_start+15:exp_velocity_end])
+            exp_velocity_loss *= self.losses_config['lambda_velocity']
+        else:
+            exp_velocity_loss = 0
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            velocity_loss
+            velocity_loss +
+            exp_velocity_loss
             # self.losses_config['lambda_commit'] * commit_loss
         )
 
@@ -129,7 +151,9 @@ class VQVAEModule(pl.LightningModule):
         
         if velocity_dim_range is not None:
             self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        
+
+        if exp_velocity_dim_range is not None:
+            self.log('val/exp_velocity_loss', exp_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         # self.log('val/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
         # self.log('val/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
 

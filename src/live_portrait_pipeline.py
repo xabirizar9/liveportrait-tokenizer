@@ -77,12 +77,17 @@ class LivePortraitPipeline(object):
 
         return template_dct
 
-    def execute(self, args: ArgumentConfig):
+    def execute(self, args: ArgumentConfig, original_video_path="animations/original.mp4"):
         # for convenience
         inf_cfg = self.live_portrait_wrapper.inference_cfg
         device = self.live_portrait_wrapper.device
         crop_cfg = self.cropper.crop_cfg
 
+        # Derive original video path from driving path, if applicable
+        if args.driving and args.driving.endswith("_reconstructed.pkl"):
+            original_video_path = args.driving.replace("_reconstructed.pkl", ".mp4")
+            original_video_path = original_video_path.replace("dataset/pickles/", "dataset/train/")
+            
         ######## load source input ########
         flag_is_source_video = False
         source_fps = None
@@ -454,21 +459,32 @@ class LivePortraitPipeline(object):
 
         mkdir(args.output_dir)
         wfp_concat = None
+        
+        # Load original video if exists
+        original_frames_lst = None
+        if osp.exists(original_video_path):
+            log(f"Loading original video from {original_video_path}")
+            original_frames_lst = load_video(original_video_path)
+            # Cut to the same number of frames
+            original_frames_lst = original_frames_lst[:n_frames]
+            log(f"Loaded {len(original_frames_lst)} frames from original video")
+        
         ######### build the final concatenation result #########
-        # driving frame | source frame | generation
+        # source frame | generation | original frame | driving frame
         if flag_is_source_video and flag_is_driving_video:
-            frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, img_crop_256x256_lst, I_p_lst)
+            frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, img_crop_256x256_lst, I_p_lst, original_frames_lst)
         elif flag_is_source_video and not flag_is_driving_video:
             if flag_load_from_template:
-                frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, img_crop_256x256_lst, I_p_lst)
+                frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, img_crop_256x256_lst, I_p_lst, original_frames_lst)
             else:
-                frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst*n_frames, img_crop_256x256_lst, I_p_lst)
+                frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst*n_frames, img_crop_256x256_lst, I_p_lst, original_frames_lst)
         else:
-            frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, [img_crop_256x256], I_p_lst)
+            frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, [img_crop_256x256], I_p_lst, original_frames_lst)
 
         if flag_is_driving_video or (flag_is_source_video and not flag_is_driving_video):
             flag_source_has_audio = flag_is_source_video and has_audio_stream(args.source)
             flag_driving_has_audio = (not flag_load_from_template) and has_audio_stream(args.driving)
+            flag_original_has_audio = osp.exists(original_video_path) and has_audio_stream(original_video_path)
 
             wfp_concat = osp.join(args.output_dir, f'{basename(args.source)}--{basename(args.driving)}_concat.mp4')
 
@@ -476,11 +492,16 @@ class LivePortraitPipeline(object):
             output_fps = source_fps if flag_is_source_video else output_fps
             images2video(frames_concatenated, wfp=wfp_concat, fps=output_fps)
 
-            if flag_source_has_audio or flag_driving_has_audio:
+            if flag_source_has_audio or flag_driving_has_audio or flag_original_has_audio:
                 # final result with concatenation
                 wfp_concat_with_audio = osp.join(args.output_dir, f'{basename(args.source)}--{basename(args.driving)}_concat_with_audio.mp4')
-                audio_from_which_video = args.driving if ((flag_driving_has_audio and args.audio_priority == 'driving') or (not flag_source_has_audio)) else args.source
-                log(f"Audio is selected from {audio_from_which_video}, concat mode")
+                # Prioritize: 1. original video 2. driving video (if priority=driving) 3. source video
+                if flag_original_has_audio:
+                    audio_from_which_video = original_video_path
+                    log(f"Audio is selected from original video: {audio_from_which_video}, concat mode")
+                else:
+                    audio_from_which_video = args.driving if ((flag_driving_has_audio and args.audio_priority == 'driving') or (not flag_source_has_audio)) else args.source
+                    log(f"Audio is selected from {audio_from_which_video}, concat mode")
                 add_audio_to_video(wfp_concat, audio_from_which_video, wfp_concat_with_audio)
                 os.replace(wfp_concat_with_audio, wfp_concat)
                 log(f"Replace {wfp_concat_with_audio} with {wfp_concat}")
@@ -493,10 +514,15 @@ class LivePortraitPipeline(object):
                 images2video(I_p_lst, wfp=wfp, fps=output_fps)
 
             ######### build the final result #########
-            if flag_source_has_audio or flag_driving_has_audio:
+            if flag_source_has_audio or flag_driving_has_audio or flag_original_has_audio:
                 wfp_with_audio = osp.join(args.output_dir, f'{basename(args.source)}--{basename(args.driving)}_with_audio.mp4')
-                audio_from_which_video = args.driving if ((flag_driving_has_audio and args.audio_priority == 'driving') or (not flag_source_has_audio)) else args.source
-                log(f"Audio is selected from {audio_from_which_video}")
+                # Prioritize: 1. original video 2. driving video (if priority=driving) 3. source video
+                if flag_original_has_audio:
+                    audio_from_which_video = original_video_path
+                    log(f"Audio is selected from original video: {audio_from_which_video}")
+                else:
+                    audio_from_which_video = args.driving if ((flag_driving_has_audio and args.audio_priority == 'driving') or (not flag_source_has_audio)) else args.source
+                    log(f"Audio is selected from {audio_from_which_video}")
                 add_audio_to_video(wfp, audio_from_which_video, wfp_with_audio)
                 os.replace(wfp_with_audio, wfp)
                 log(f"Replace {wfp_with_audio} with {wfp}")

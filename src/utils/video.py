@@ -81,24 +81,66 @@ def blend(img: np.ndarray, mask: np.ndarray, background_color=(255, 255, 255)):
     return img
 
 
-def concat_frames(driving_image_lst, source_image_lst, I_p_lst):
+def concat_frames(driving_image_lst, source_image_lst, I_p_lst, original_frames_lst=None):
     # TODO: add more concat style, e.g., left-down corner driving
     out_lst = []
     h, w, _ = I_p_lst[0].shape
     source_image_resized_lst = [cv2.resize(img, (w, h)) for img in source_image_lst]
 
+    # Define text properties
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 1.0
+    font_thickness = 2
+    text_color = (255, 255, 255)  # White
+    bg_color = (0, 0, 0)  # Black
+    padding = 10
+    text_height = 30
+
     for idx, _ in track(enumerate(I_p_lst), total=len(I_p_lst), description='Concatenating result...'):
         I_p = I_p_lst[idx]
         source_image_resized = source_image_resized_lst[idx] if len(source_image_lst) > 1 else source_image_resized_lst[0]
 
-        if driving_image_lst is None:
-            out = np.hstack((source_image_resized, I_p))
-        else:
+        frames_to_stack = []
+        labels = []
+        
+        # Add source frame first
+        source_with_label = source_image_resized.copy()
+        labels.append(("Source", source_with_label))
+        
+        # Add generated frame second
+        generated_with_label = I_p.copy()
+        labels.append(("Generated", generated_with_label))
+        
+        # Add original frame third if available
+        if original_frames_lst is not None:
+            original_frame = original_frames_lst[idx] if idx < len(original_frames_lst) else original_frames_lst[-1]
+            original_frame_resized = cv2.resize(original_frame, (w, h))
+            labels.append(("Original", original_frame_resized))
+            
+        # Add driving frame if available (optional, can be removed if not needed)
+        if driving_image_lst is not None:
             driving_image = driving_image_lst[idx]
             driving_image_resized = cv2.resize(driving_image, (w, h))
-            out = np.hstack((driving_image_resized, source_image_resized, I_p))
-
+            labels.append(("Driving", driving_image_resized))
+        
+        # Add labels to each frame
+        for text, frame in labels:
+            # Calculate text position
+            text_size = cv2.getTextSize(text, font, font_scale, font_thickness)[0]
+            text_x = (frame.shape[1] - text_size[0]) // 2
+            
+            # Add black background for text
+            cv2.rectangle(frame, (0, 0), (frame.shape[1], text_height + padding*2), bg_color, -1)
+            
+            # Add text
+            cv2.putText(frame, text, (text_x, text_height), font, font_scale, text_color, font_thickness, cv2.LINE_AA)
+            
+            frames_to_stack.append(frame)
+        
+        # Stack all frames horizontally
+        out = np.hstack(frames_to_stack)
         out_lst.append(out)
+        
     return out_lst
 
 
@@ -216,3 +258,34 @@ def bb_intersection_over_union(boxA, boxB):
     boxBArea = (boxB[2] - boxB[0] + 1) * (boxB[3] - boxB[1] + 1)
     iou = interArea / float(boxAArea + boxBArea - interArea)
     return iou
+
+
+def merge_videos(original_video_path: str, animated_video_path: str, output_video_path: str):
+    """
+    Merge two videos side by side using ffmpeg.
+    
+    :param original_video_path: Path to the original video
+    :param animated_video_path: Path to the animated video
+    :param output_video_path: Path to save the merged video
+    """
+    if not osp.exists(original_video_path) or not osp.exists(animated_video_path):
+        log(f"One of the videos doesn't exist: {original_video_path} or {animated_video_path}")
+        return
+    
+    # Command to merge videos side by side with same height (maintains aspect ratio)
+    cmd = [
+        'ffmpeg',
+        '-y',
+        '-i', f'"{original_video_path}"',
+        '-i', f'"{animated_video_path}"',
+        '-filter_complex', '[0:v]scale=-1:720[left];[1:v]scale=-1:720[right];[left][right]hstack=inputs=2',
+        '-c:v', 'libx264',
+        '-crf', '18',
+        f'"{output_video_path}"'
+    ]
+    
+    try:
+        exec_cmd(' '.join(cmd))
+        log(f"Side-by-side video created successfully: {output_video_path}")
+    except subprocess.CalledProcessError as e:
+        log(f"Error merging videos: {e}")

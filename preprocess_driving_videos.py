@@ -224,6 +224,16 @@ class BatchedPreprocessingModule(pl.LightningModule):
         
         log("Using video without cropping...")
         driving_lmk_crop_lst = self.cropper.calc_lmks_from_cropped_video(driving_rgb_lst)
+        
+        # Check if the face detection succeeded
+        if driving_lmk_crop_lst is None:
+            log(f"Failed to detect faces in video: {video_path}. Logging to faulty_videos.txt file.")
+            # Log the failed video to a file
+            faulty_videos_path = self.template_dir / "faulty_videos.txt"
+            with open(faulty_videos_path, "a") as f:
+                f.write(f"{video_path}\n")
+            return None
+            
         driving_rgb_crop_256x256_lst = [cv2.resize(_, (256, 256)) for _ in driving_rgb_lst]
         c_d_eyes_lst, c_d_lip_lst = self.live_portrait_wrapper.calc_ratio(driving_lmk_crop_lst)
         

@@ -59,8 +59,16 @@ def main():
         crop_cfg=crop_cfg
     )
 
-    # run
-    live_portrait_pipeline.execute(args)
+    # run with optional original_video parameter
+    original_video_path = args.original_video if hasattr(args, 'original_video') and args.original_video else "animations/original.mp4"
+    
+    # Derive original video path from driving path, if applicable
+    if args.driving and args.driving.endswith("_reconstructed.pkl"):
+        original_video_path = args.driving.replace("_reconstructed.pkl", ".mp4")
+        original_video_path = original_video_path.replace("dataset/pickles/", "dataset/train/")
+    
+    print(f"Using original video: {original_video_path}")
+    live_portrait_pipeline.execute(args, original_video_path)
 
 
 if __name__ == "__main__":

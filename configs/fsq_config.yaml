@@ -19,7 +19,7 @@ step_log_frequency: 20
 
 feats_enabled:
   kp:
-    enabled: false
+    enabled: true
     shape: [1, 21, 3]
   kp_velocity:
     enabled: false
@@ -31,35 +31,35 @@ feats_enabled:
     enabled: true
     shape: [1, 21, 3]
   exp_velocity:
-    enabled: false
+    enabled: true
     shape: [1, 21, 3]
   exp_acceleration:
     enabled: false
     shape: [1, 21, 3]
   x_s:
-    enabled: false
+    enabled: true
     shape: [1, 21, 3]
   t:
-    enabled: false
+    enabled: true
     shape: [1, 3]
   R:
-    enabled: false
+    enabled: true
     shape: [1, 3, 3]
   scale:
-    enabled: false
+    enabled: true
     shape: [1,]
   c_eyes_lst:
-    enabled: false
+    enabled: true
     shape: [1, 2]
   c_lip_lst:
-    enabled: false
+    enabled: true
     shape: [1, 1]
 
 # Model parameters
 vqvae:
-  nfeats: 63
+  nfeats: 268
   levels: [5, 5, 5, 5, 5, 5, 5, 5]
-  output_emb_width: 63
+  output_emb_width: 20
   down_t: 2
   stride_t: 1
   width: 512
@@ -74,6 +74,7 @@ losses:
   lambda_feature: 1.0
   lambda_velocity: 0.3
   lambda_commit: 0.02
+  lambda_acceleration: 0.3
 
 # Optimizer parameters
 optimizer:

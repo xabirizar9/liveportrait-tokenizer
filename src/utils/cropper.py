@@ -296,7 +296,8 @@ class Cropper(object):
                 )
                 if len(src_face) == 0:
                     log(f"No face detected in the frame #{idx}")
-                    raise Exception(f"No face detected in the frame #{idx}")
+                    # Instead of raising an exception, return None to indicate failure
+                    return None
                 elif len(src_face) > 1:
                     log(f"More than one face detected in the driving frame_{idx}, only pick one face by rule {direction}.")
                 src_face = src_face[0]
