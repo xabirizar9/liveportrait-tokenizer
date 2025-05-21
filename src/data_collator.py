@@ -25,8 +25,14 @@ def collate_fn(batch, feats_enabled, max_seq_len=300):
 
             if is_enabled:
                 # Reshape the feature and get its flattened dimension
-                reshaped_feat = sample[feat].reshape(seq_len, -1)
+                if feat == 'exp_velocity' or feat == 'exp':
+                    # Remove some of the features from exp_velocity (e.g. first 15 of the exp dim range)
+                    reshaped_feat = sample[feat][..., 15:, :].reshape(seq_len, -1)
+                else:
+                    reshaped_feat = sample[feat].reshape(seq_len, -1)
+                
                 feat_dim = reshaped_feat.shape[1]
+
                 
                 # Store the dimension range for this feature
                 dim_ranges[feat] = (current_dim, current_dim + feat_dim)

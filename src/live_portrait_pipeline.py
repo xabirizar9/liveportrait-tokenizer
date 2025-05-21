@@ -77,7 +77,7 @@ class LivePortraitPipeline(object):
 
         return template_dct
 
-    def execute(self, args: ArgumentConfig, original_video_path="animations/original.mp4"):
+    def execute(self, args: ArgumentConfig, original_video_path="animations/original.mp4", baseline_video_path=None):
         # for convenience
         inf_cfg = self.live_portrait_wrapper.inference_cfg
         device = self.live_portrait_wrapper.device
@@ -469,24 +469,42 @@ class LivePortraitPipeline(object):
             original_frames_lst = original_frames_lst[:n_frames]
             log(f"Loaded {len(original_frames_lst)} frames from original video")
         
+        # Load baseline video if exists
+        baseline_frames_lst = None
+        if baseline_video_path and osp.exists(baseline_video_path):
+            log(f"Loading baseline video from {baseline_video_path}")
+            baseline_frames_lst = load_video(baseline_video_path)
+            # Cut to the same number of frames
+            baseline_frames_lst = baseline_frames_lst[:n_frames]
+            log(f"Loaded {len(baseline_frames_lst)} frames from baseline video")
+        
         ######### build the final concatenation result #########
-        # source frame | generation | original frame | driving frame
+        # source frame | generation | original frame | baseline frame | driving frame
         if flag_is_source_video and flag_is_driving_video:
-            frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, img_crop_256x256_lst, I_p_lst, original_frames_lst)
+            frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, img_crop_256x256_lst, I_p_lst, original_frames_lst, baseline_frames_lst)
         elif flag_is_source_video and not flag_is_driving_video:
             if flag_load_from_template:
-                frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, img_crop_256x256_lst, I_p_lst, original_frames_lst)
+                frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, img_crop_256x256_lst, I_p_lst, original_frames_lst, baseline_frames_lst)
             else:
-                frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst*n_frames, img_crop_256x256_lst, I_p_lst, original_frames_lst)
+                frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst*n_frames, img_crop_256x256_lst, I_p_lst, original_frames_lst, baseline_frames_lst)
         else:
-            frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, [img_crop_256x256], I_p_lst, original_frames_lst)
+            frames_concatenated = concat_frames(driving_rgb_crop_256x256_lst, [img_crop_256x256], I_p_lst, original_frames_lst, baseline_frames_lst)
 
         if flag_is_driving_video or (flag_is_source_video and not flag_is_driving_video):
             flag_source_has_audio = flag_is_source_video and has_audio_stream(args.source)
             flag_driving_has_audio = (not flag_load_from_template) and has_audio_stream(args.driving)
             flag_original_has_audio = osp.exists(original_video_path) and has_audio_stream(original_video_path)
 
+            # Set default concat filename
             wfp_concat = osp.join(args.output_dir, f'{basename(args.source)}--{basename(args.driving)}_concat.mp4')
+            
+            # Update naming for custom file patterns
+            if hasattr(args, 'output_index') and args.driving and args.driving.endswith("_reconstructed.pkl"):
+                video_id = basename(args.driving).replace("_reconstructed.pkl", "")
+                wfp_concat = osp.join(args.output_dir, f'{video_id}_{args.output_index}_concat.mp4')
+            elif args.driving and args.driving.endswith(".pkl") and not args.driving.endswith("_reconstructed.pkl"):
+                video_id = basename(args.driving).replace(".pkl", "")
+                wfp_concat = osp.join(args.output_dir, f'{video_id}_baseline_concat.mp4')
 
             # NOTE: update output fps
             output_fps = source_fps if flag_is_source_video else output_fps
@@ -494,7 +512,8 @@ class LivePortraitPipeline(object):
 
             if flag_source_has_audio or flag_driving_has_audio or flag_original_has_audio:
                 # final result with concatenation
-                wfp_concat_with_audio = osp.join(args.output_dir, f'{basename(args.source)}--{basename(args.driving)}_concat_with_audio.mp4')
+                wfp_concat_with_audio = wfp_concat.replace(".mp4", "_with_audio.mp4")
+                
                 # Prioritize: 1. original video 2. driving video (if priority=driving) 3. source video
                 if flag_original_has_audio:
                     audio_from_which_video = original_video_path
@@ -508,6 +527,16 @@ class LivePortraitPipeline(object):
 
             # save the animated result
             wfp = osp.join(args.output_dir, f'{basename(args.source)}--{basename(args.driving)}.mp4')
+            
+            # If this is a reconstructed run with an output index, use that for naming
+            if hasattr(args, 'output_index') and args.driving and args.driving.endswith("_reconstructed.pkl"):
+                video_id = basename(args.driving).replace("_reconstructed.pkl", "")
+                wfp = osp.join(args.output_dir, f'{video_id}_{args.output_index}.mp4')
+            elif args.driving and args.driving.endswith(".pkl") and not args.driving.endswith("_reconstructed.pkl"):
+                # If this is the baseline creation run
+                video_id = basename(args.driving).replace(".pkl", "")
+                wfp = osp.join(args.output_dir, f'{video_id}_baseline.mp4')
+                
             if I_p_pstbk_lst is not None and len(I_p_pstbk_lst) > 0:
                 images2video(I_p_pstbk_lst, wfp=wfp, fps=output_fps)
             else:
@@ -515,7 +544,13 @@ class LivePortraitPipeline(object):
 
             ######### build the final result #########
             if flag_source_has_audio or flag_driving_has_audio or flag_original_has_audio:
-                wfp_with_audio = osp.join(args.output_dir, f'{basename(args.source)}--{basename(args.driving)}_with_audio.mp4')
+                # Only change this if we haven't already customized the filename pattern
+                if not (hasattr(args, 'output_index') or (args.driving and args.driving.endswith(".pkl") and not args.driving.endswith("_reconstructed.pkl"))):
+                    wfp_with_audio = osp.join(args.output_dir, f'{basename(args.source)}--{basename(args.driving)}_with_audio.mp4')
+                else:
+                    # Use the same pattern as the video but add _with_audio
+                    wfp_with_audio = wfp.replace('.mp4', '_with_audio.mp4')
+                
                 # Prioritize: 1. original video 2. driving video (if priority=driving) 3. source video
                 if flag_original_has_audio:
                     audio_from_which_video = original_video_path

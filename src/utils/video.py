@@ -81,7 +81,7 @@ def blend(img: np.ndarray, mask: np.ndarray, background_color=(255, 255, 255)):
     return img
 
 
-def concat_frames(driving_image_lst, source_image_lst, I_p_lst, original_frames_lst=None):
+def concat_frames(driving_image_lst, source_image_lst, I_p_lst, original_frames_lst=None, baseline_frames_lst=None):
     # TODO: add more concat style, e.g., left-down corner driving
     out_lst = []
     h, w, _ = I_p_lst[0].shape
@@ -111,7 +111,13 @@ def concat_frames(driving_image_lst, source_image_lst, I_p_lst, original_frames_
         generated_with_label = I_p.copy()
         labels.append(("Generated", generated_with_label))
         
-        # Add original frame third if available
+        # Add baseline frame third if available
+        if baseline_frames_lst is not None:
+            baseline_frame = baseline_frames_lst[idx] if idx < len(baseline_frames_lst) else baseline_frames_lst[-1]
+            baseline_frame_resized = cv2.resize(baseline_frame, (w, h))
+            labels.append(("Reconstruction Baseline", baseline_frame_resized))
+        
+        # Add original frame fourth if available
         if original_frames_lst is not None:
             original_frame = original_frames_lst[idx] if idx < len(original_frames_lst) else original_frames_lst[-1]
             original_frame_resized = cv2.resize(original_frame, (w, h))

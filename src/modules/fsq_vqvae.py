@@ -72,7 +72,8 @@ class FSQVAE(nn.Module):
                 self.quantizer = FSQ(
                     levels=levels,
                     dim=output_emb_width,
-                    preserve_symmetry=True
+                    preserve_symmetry=True,
+                    return_indices=False
                 )
             else:
                 print("Using ResidualFSQ")
@@ -80,7 +81,8 @@ class FSQVAE(nn.Module):
                     levels=levels,
                     num_quantizers=num_quantizers,
                     dim=output_emb_width,
-                    preserve_symmetry=True
+                    preserve_symmetry=True,
+                    return_indices=False
                 )
         else:   
             print(f"Quantization disabled")
@@ -137,20 +139,29 @@ class FSQVAE(nn.Module):
         Encode inputs to latent representations.
         For FSQ, this returns the indices from the quantization process.
         """
-        _, N, T = features.shape
+        B, _, T = features.shape
 
         x_in = self.preprocess(features)
         x_encoder = self.encoder(x_in) # encode to latent space
 
         x_encoder = self.postprocess(x_encoder)
         
-        # Apply FSQ and get the indices
-        _, indices = self.quantizer(x_encoder) # expects (bs, T, C, d)
+        # Apply FSQ and get quantized vectors
+        x_quantized, indices = self.quantizer(x_encoder)
         
-        print(indices.shape)
-        N, C, T = x_encoder.shape
-        indices = indices.view(N * T, -1)  # Flatten all indices dimensions
-        indices = indices.view(N, T, -1)   # Reshape to [N, T, flattened_indices]
+        # If indices were not returned (return_indices=False), calculate them
+        if indices is None:
+            # Reshape for codes_to_indices if needed
+            N, T, C = x_quantized.shape
+            # Calculate indices directly from quantized vectors
+            indices = self.quantizer.codes_to_indices(x_quantized.reshape(-1, self.output_emb_width))
+            indices = indices.reshape(N, T, 1)  # Reshape back to [N, T, 1]
+        
+        # Ensure proper shape for returning
+        N, T, C = x_encoder.shape if len(x_encoder.shape) == 3 else (B, T, self.output_emb_width)
+        indices = indices.view(N, T, -1)  # Reshape to [N, T, flattened_indices]
+        
+        print(f"Indices shape: {indices.shape}")
     
         # Return indices and None for distribution (to match original interface)
         return indices

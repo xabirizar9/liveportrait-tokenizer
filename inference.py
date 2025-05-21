@@ -66,9 +66,72 @@ def main():
     if args.driving and args.driving.endswith("_reconstructed.pkl"):
         original_video_path = args.driving.replace("_reconstructed.pkl", ".mp4")
         original_video_path = original_video_path.replace("dataset/pickles/", "dataset/train/")
+        
+        # Get video_id from driving path
+        video_id = os.path.basename(args.driving).replace("_reconstructed.pkl", "")
+        
+        # Check for baseline video
+        baseline_video_path = os.path.join(args.output_dir, f"{video_id}_baseline.mp4")
+        
+        if not os.path.exists(baseline_video_path):
+            print(f"Baseline video not found: {baseline_video_path}")
+            
+            # Try to create baseline video using original pickle
+            original_pickle = f"dataset/pickles/{video_id}.pkl"
+            if os.path.exists(original_pickle):
+                print(f"Found original pickle: {original_pickle}")
+                
+                # Save current driving path
+                temp_driving = args.driving
+                
+                # Set driving to original pickle and run pipeline
+                args.driving = original_pickle
+                print(f"Running pipeline with original pickle to generate baseline...")
+                
+                # This will create the baseline video
+                live_portrait_pipeline.execute(args, original_video_path)
+                
+                # Restore driving path
+                args.driving = temp_driving
+                
+                # Now the baseline should exist for the second run
+                if os.path.exists(baseline_video_path):
+                    print(f"Successfully created baseline: {baseline_video_path}")
+                else:
+                    print("Failed to create baseline video")
+            else:
+                print(f"Original pickle not found: {original_pickle}")
+        else:
+            print(f"Found baseline video: {baseline_video_path}")
     
-    print(f"Using original video: {original_video_path}")
-    live_portrait_pipeline.execute(args, original_video_path)
+    # Find the next available index for the output video
+    if args.driving and args.driving.endswith("_reconstructed.pkl"):
+        video_id = os.path.basename(args.driving).replace("_reconstructed.pkl", "")
+        index = 1
+        while True:
+            test_path = os.path.join(args.output_dir, f"{video_id}_{index}.mp4")
+            if not os.path.exists(test_path):
+                break
+            index += 1
+        
+        # Temporarily save the output index
+        args.output_index = index
+        print(f"Output video will be named: {video_id}_{index}.mp4")
+    
+    # Check if original video exists and report
+    if os.path.exists(original_video_path):
+        print(f"Using original video: {original_video_path}")
+    else:
+        print(f"Original video not found: {original_video_path}")
+        
+    # Run the pipeline (with baseline if available)
+    baseline_video_path = os.path.join(args.output_dir, f"{video_id}_baseline.mp4") if args.driving and args.driving.endswith("_reconstructed.pkl") else None
+    if baseline_video_path and os.path.exists(baseline_video_path):
+        print(f"Using baseline video: {baseline_video_path}")
+    else:
+        baseline_video_path = None
+        
+    live_portrait_pipeline.execute(args, original_video_path, baseline_video_path)
 
 
 if __name__ == "__main__":

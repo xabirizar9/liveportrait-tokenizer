@@ -3,16 +3,20 @@ import pandas as pd
 import numpy as np
 import pickle
 from pathlib import Path
+import concurrent.futures
+from tqdm import tqdm
+import os
 
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, data_path: str, split: str = 'train', val_split: float = 0.2, seed: int = 42, 
-                 compute_stats: bool = True):
+                 compute_stats: bool = True, num_threads: int = 8):
         self.data_path = Path(data_path)
         self.pickle_dir = self.data_path / "pickles"
         self.split = split
         self.val_split = val_split
         self.seed = seed
+        self.num_threads = num_threads
 
         # Get all pickle files
         all_pickle_paths = list(self.pickle_dir.glob("*.pkl"))
@@ -28,18 +32,22 @@ class Dataset(torch.utils.data.Dataset):
         stats_path = self.data_path / "stats_all.pkl"
         
         if compute_stats:
-                # Compute statistics from the entire dataset
-                print(f"Computing statistics for entire dataset...")
-                self.compute_statistics(all_pickle_paths, stats_path)
-                print(f"Statistics saved to {stats_path}")
+            # Compute statistics from the entire dataset
+            print(f"Computing statistics for entire dataset using {self.num_threads} threads...")
+            self.compute_statistics(all_pickle_paths, stats_path)
+            print(f"Statistics saved to {stats_path}")
+        elif stats_path.exists():
+            # Load precomputed statistics if available
+            print(f"Loading precomputed statistics from {stats_path}")
+            with open(stats_path, 'rb') as f:
+                stats = pickle.load(f)
+                self.mean = stats['mean']
+                self.std = stats['std']
+                print(f"Loaded feature-wise statistics successfully")
         else:
-            if stats_path.exists():
-                print(f"Loading precomputed statistics from {stats_path}")
-                with open(stats_path, 'rb') as f:
-                    stats = pickle.load(f)
-                    self.mean = stats['mean']
-                    self.std = stats['std']
-                    print(f"Loaded feature-wise statistics successfully")
+            # Neither computing nor loading statistics
+            print(f"Warning: Not computing statistics and no precomputed statistics found at {stats_path}")
+            print(f"Normalization will not be applied. Consider setting compute_stats=True")
             
         # Now split the dataset for training/validation
         np.random.seed(seed)
@@ -53,9 +61,9 @@ class Dataset(torch.utils.data.Dataset):
         
         print(f"Loaded {len(self.pickle_paths)} {split} samples")
 
-    def compute_statistics(self, pickle_paths, stats_path):
-        """Compute mean and std of the entire dataset for normalization"""
-        feature_data = {
+    def process_pickle_file(self, pickle_path):
+        """Process a single pickle file and extract features"""
+        features = {
             'kp': [],
             'exp': [],
             'x_s': [],
@@ -69,18 +77,15 @@ class Dataset(torch.utils.data.Dataset):
             'kp_acceleration': [],
             'exp_acceleration': []
         }
-
-        print(f"Computing statistics for {len(pickle_paths)} samples")
         
-        # Collect features and calculate derivatives with correct FPS for each pickle
-        for pickle_path in pickle_paths:    
+        try:
             with open(pickle_path, 'rb') as f:
                 data = pickle.load(f)
             
             motion = data['motion']
             c_eyes_lst = data['c_eyes_lst']
             c_lip_lst = data['c_lip_lst']
-            fps = data['output_fps']  # Get specific FPS for this pickle
+            fps = data['output_fps']
             
             # Extract features for the current pickle
             current_kp = []
@@ -95,37 +100,85 @@ class Dataset(torch.utils.data.Dataset):
                 current_exp.append(exp)
                 
                 # Add primary features to the dataset
-                feature_data['kp'].append(kp)
-                feature_data['exp'].append(exp)
-                feature_data['x_s'].append(torch.tensor(m['x_s']).reshape(-1, 63))
-                feature_data['t'].append(torch.tensor(m['t']).reshape(-1, 3))
-                feature_data['R'].append(torch.tensor(m['R']).reshape(-1, 9))
-                feature_data['scale'].append(torch.tensor(m['scale']).reshape(-1, 1))
-                feature_data['c_eyes_lst'].append(torch.tensor(c_eyes_lst[i]).reshape(-1, 2))
-                feature_data['c_lip_lst'].append(torch.tensor(c_lip_lst[i]).reshape(-1, 1))
+                features['kp'].append(kp)
+                features['exp'].append(exp)
+                features['x_s'].append(torch.tensor(m['x_s']).reshape(-1, 63))
+                features['t'].append(torch.tensor(m['t']).reshape(-1, 3))
+                features['R'].append(torch.tensor(m['R']).reshape(-1, 9))
+                features['scale'].append(torch.tensor(m['scale']).reshape(-1, 1))
+                features['c_eyes_lst'].append(torch.tensor(c_eyes_lst[i]).reshape(-1, 2))
+                features['c_lip_lst'].append(torch.tensor(c_lip_lst[i]).reshape(-1, 1))
             
             # Stack features for this pickle to maintain temporal relationships
-            stacked_kp = torch.cat(current_kp, dim=0)
-            stacked_exp = torch.cat(current_exp, dim=0)
+            if current_kp:
+                stacked_kp = torch.cat(current_kp, dim=0)
+                stacked_exp = torch.cat(current_exp, dim=0)
+                
+                # Calculate derivatives using the correct FPS for this pickle
+                # Velocity
+                kp_velocity = self.calculate_velocity(stacked_kp, fps)
+                exp_velocity = self.calculate_velocity(stacked_exp, fps)
+                features['kp_velocity'].extend(kp_velocity.unbind(0))
+                features['exp_velocity'].extend(exp_velocity.unbind(0))
+                
+                # Acceleration
+                kp_acceleration = self.calculate_acceleration(stacked_kp, fps)
+                exp_acceleration = self.calculate_acceleration(stacked_exp, fps)
+                features['kp_acceleration'].extend(kp_acceleration.unbind(0))
+                features['exp_acceleration'].extend(exp_acceleration.unbind(0))
+        except Exception as e:
+            print(f"Error processing {pickle_path}: {str(e)}")
+        
+        return features
+
+    def compute_statistics(self, pickle_paths, stats_path):
+        """Compute mean and std of the entire dataset for normalization using threads"""
+        print(f"Computing statistics for {len(pickle_paths)} samples using {self.num_threads} threads")
+        
+        # Initialize combined feature data
+        all_features = {
+            'kp': [],
+            'exp': [],
+            'x_s': [],
+            't': [],
+            'R': [],
+            'scale': [],
+            'c_eyes_lst': [],
+            'c_lip_lst': [],
+            'kp_velocity': [],
+            'exp_velocity': [],
+            'kp_acceleration': [],
+            'exp_acceleration': []
+        }
+        
+        # Process files using a thread pool
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_threads) as executor:
+            # Submit all tasks and get future objects
+            future_to_path = {executor.submit(self.process_pickle_file, path): path for path in pickle_paths}
             
-            # Calculate derivatives using the correct FPS for this pickle
-            # Velocity
-            kp_velocity = self.calculate_velocity(stacked_kp, fps)
-            exp_velocity = self.calculate_velocity(stacked_exp, fps)
-            feature_data['kp_velocity'].extend(kp_velocity.unbind(0))
-            feature_data['exp_velocity'].extend(exp_velocity.unbind(0))
-            
-            # Acceleration
-            kp_acceleration = self.calculate_acceleration(stacked_kp, fps)
-            exp_acceleration = self.calculate_acceleration(stacked_exp, fps)
-            feature_data['kp_acceleration'].extend(kp_acceleration.unbind(0))
-            feature_data['exp_acceleration'].extend(exp_acceleration.unbind(0))
+            # Process completed futures with a progress bar
+            for future in tqdm(concurrent.futures.as_completed(future_to_path), total=len(pickle_paths), desc="Processing files"):
+                path = future_to_path[future]
+                try:
+                    # Get the result from the future
+                    file_features = future.result()
+                    
+                    # Add features to the combined data
+                    for key in all_features:
+                        if file_features[key]:
+                            all_features[key].extend(file_features[key])
+                except Exception as e:
+                    print(f"Error processing {path}: {str(e)}")
         
         # Stack all features 
         stacked_features = {}
-        for key in feature_data:
-            if feature_data[key]:  # Check that list is not empty
-                stacked_features[key] = torch.stack(feature_data[key])
+        for key in all_features:
+            if all_features[key]:  # Check that list is not empty
+                try:
+                    stacked_features[key] = torch.stack(all_features[key])
+                    print(f"Stacked {len(all_features[key])} values for feature {key}")
+                except Exception as e:
+                    print(f"Error stacking feature {key}: {str(e)}")
         
         # Compute statistics for each feature type
         self.mean = {}
@@ -143,7 +196,6 @@ class Dataset(torch.utils.data.Dataset):
         
         print(f"Computed feature-wise statistics successfully")
     
-
     def calculate_derivative(self, feature, output_fps, order=1):
         """
         Calculate time derivatives (velocity, acceleration, etc.) for any feature.

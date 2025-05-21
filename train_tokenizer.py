@@ -51,16 +51,21 @@ class VQVAEModule(pl.LightningModule):
         self.warmup_steps = warmup_steps
         self.warmup_factor = warmup_factor  # Initial LR multiplier during warmup
         self.min_lr_factor = min_lr_factor  # Minimum LR multiplier after decay
+        
+        # Store batch size for logging
+        self.batch_size = vqvae_config.get('batch_size', 32)
 
     def training_step(self, batch, batch_idx):
         # Get features from batch
         features = batch['features']  # Shape: [batch_size, max_seq_len, feature_dim]
         dim_ranges = batch['dim_ranges']
+        
+        # Get actual batch size for this step
+        batch_size = features.size(0)
 
         velocity_dim_range = dim_ranges.get('kp_velocity', None)
 
         exp_velocity_dim_range = dim_ranges.get('exp_velocity', None)
-
 
         # Forward pass through VQVAE
         reconstr = self.vqvae(features)
@@ -77,7 +82,7 @@ class VQVAEModule(pl.LightningModule):
 
         if exp_velocity_dim_range is not None:
             exp_velocity_start, exp_velocity_end = exp_velocity_dim_range
-            exp_velocity_loss = F.smooth_l1_loss(reconstr[..., exp_velocity_start+15:exp_velocity_end], features[..., exp_velocity_start+15:exp_velocity_end])
+            exp_velocity_loss = F.smooth_l1_loss(reconstr[..., exp_velocity_start:exp_velocity_end], features[..., exp_velocity_start:exp_velocity_end])
             exp_velocity_loss *= self.losses_config['lambda_velocity']
         else:
             exp_velocity_loss = 0
@@ -92,30 +97,33 @@ class VQVAEModule(pl.LightningModule):
 
         # Log metrics with proper sync_dist setting
         # Main loss metrics - show in progress bar but only log epoch averages to wandb
-        self.log('train/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('train/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
 
         if velocity_dim_range is not None:
-            self.log('train/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+            self.log('train/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
         
         if exp_velocity_dim_range is not None:
-            self.log('train/exp_velocity_loss', exp_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+            self.log('train/exp_velocity_loss', exp_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
 
         # Detailed component losses - only log epoch averages to wandb
-        self.log('train/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        # self.log('train/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        # self.log('train/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('train/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
+        # self.log('train/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
+        # self.log('train/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
         
         # If you want more frequent logging for specific metrics, use logging_interval
         # Log learning rate at regular intervals (every N steps based on trainer.log_every_n_steps)
         if batch_idx % self.trainer.log_every_n_steps == 0:
             current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
-            self.log('train/learning_rate', current_lr, sync_dist=True, rank_zero_only=True)
+            self.log('train/learning_rate', current_lr, sync_dist=True, rank_zero_only=True, batch_size=batch_size)
 
         return total_loss
 
     def validation_step(self, batch, batch_idx):
         # Get features from batch
-        features = batch['features']  # Shape: [batch_size, max_seq_len, feature_dim]
+        features = batch['features'][..., :45]  # Shape: [batch_size, max_seq_len, feature_dim]
+        
+        # Get actual batch size for this step
+        batch_size = features.size(0)
 
         velocity_dim_range = batch['dim_ranges'].get('kp_velocity', None)
         exp_velocity_dim_range = batch['dim_ranges'].get('exp_velocity', None)
@@ -146,16 +154,16 @@ class VQVAEModule(pl.LightningModule):
         )
 
         # For validation, we typically want epoch-level statistics only
-        self.log('val/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        self.log('val/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+        self.log('val/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
+        self.log('val/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
         
         if velocity_dim_range is not None:
-            self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+            self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
 
         if exp_velocity_dim_range is not None:
-            self.log('val/exp_velocity_loss', exp_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        # self.log('val/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
-        # self.log('val/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True)
+            self.log('val/exp_velocity_loss', exp_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
+        # self.log('val/commit_loss', commit_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
+        # self.log('val/perplexity', perplexity, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
 
         return total_loss
 
@@ -330,6 +338,9 @@ def main(config):
     )
 
     # Set up model
+    # Add batch_size to vqvae_config from main config
+    config['vqvae']['batch_size'] = config['batch_size']
+    
     model = VQVAEModule(
         vqvae_config=config['vqvae'],
         losses_config=config['losses'],
