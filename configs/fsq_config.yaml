@@ -1,7 +1,7 @@
 # Data parameters
 data_path: "dataset"
 output_path: "outputs"
-run_name: "vae-fsq-lip_focus_exp-D20-L4"
+run_name: "vae-fsq-all_except_exp-D10-L4"
 batch_size: 32
 num_workers: 8
 val_split: 0.1
@@ -10,7 +10,7 @@ compute_stats: false  # Whether to compute normalization statistics
 max_seq_len: 300  # Maximum sequence length for training
 
 # Training parameters
-max_epochs: 1000
+max_epochs: 2000
 learning_rate: 1e-4
 check_val_every_n_epoch: 10
 checkpoint_frequency: 10
@@ -19,7 +19,7 @@ step_log_frequency: 20
 
 feats_enabled:
   kp:
-    enabled: false
+    enabled: true
     shape: [1, 21, 3]
   kp_velocity:
     enabled: false
@@ -28,36 +28,36 @@ feats_enabled:
     enabled: false
     shape: [1, 21, 3]
   exp:
-    enabled: true
+    enabled: false
     shape: [1, 21, 3]
   exp_velocity:
-    enabled: true
+    enabled: false
     shape: [1, 21, 3]
   exp_acceleration:
     enabled: false
     shape: [1, 21, 3]
   x_s:
-    enabled: false
+    enabled: true
     shape: [1, 21, 3]
   t:
-    enabled: false
+    enabled: true
     shape: [1, 3]
   R:
-    enabled: false
+    enabled: true
     shape: [1, 3, 3]
   scale:
-    enabled: false
+    enabled: true
     shape: [1,]
   c_eyes_lst:
-    enabled: false
+    enabled: true
     shape: [1, 2]
   c_lip_lst:
-    enabled: false
+    enabled: true
     shape: [1, 1]
 
 # Model parameters
 vqvae:
-  nfeats: 36
+  nfeats: 142
   levels: [4, 4, 4, 4, 4, 4, 4, 4]
   output_emb_width: 10
   down_t: 2

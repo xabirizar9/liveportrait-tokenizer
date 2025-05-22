@@ -64,7 +64,6 @@ class VQVAEModule(pl.LightningModule):
         batch_size = features.size(0)
 
         velocity_dim_range = dim_ranges.get('kp_velocity', None)
-
         exp_velocity_dim_range = dim_ranges.get('exp_velocity', None)
 
         # Forward pass through VQVAE
@@ -120,7 +119,7 @@ class VQVAEModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         # Get features from batch
-        features = batch['features'][..., :45]  # Shape: [batch_size, max_seq_len, feature_dim]
+        features = batch['features']  # Shape: [batch_size, max_seq_len, feature_dim]
         
         # Get actual batch size for this step
         batch_size = features.size(0)
