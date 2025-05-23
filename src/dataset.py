@@ -75,7 +75,9 @@ class Dataset(torch.utils.data.Dataset):
             'kp_velocity': [],
             'exp_velocity': [],
             'kp_acceleration': [],
-            'exp_acceleration': []
+            'exp_acceleration': [],
+            'R_velocity': [],
+            'scale_velocity': []
         }
         
         try:
@@ -90,14 +92,19 @@ class Dataset(torch.utils.data.Dataset):
             # Extract features for the current pickle
             current_kp = []
             current_exp = []
+            current_R = []
+            current_scale = []
             
             # Extract keypoints and expressions for all frames
             for i, m in enumerate(motion):
                 kp = torch.tensor(m['kp']).reshape(-1, 63)
                 exp = torch.tensor(m['exp']).reshape(-1, 63)
-                
+                R = torch.tensor(m['R']).reshape(-1, 9)
+                scale = torch.tensor(m['scale']).reshape(-1, 1)
                 current_kp.append(kp)
                 current_exp.append(exp)
+                current_R.append(R)
+                current_scale.append(scale)
                 
                 # Add primary features to the dataset
                 features['kp'].append(kp)
@@ -113,13 +120,19 @@ class Dataset(torch.utils.data.Dataset):
             if current_kp:
                 stacked_kp = torch.cat(current_kp, dim=0)
                 stacked_exp = torch.cat(current_exp, dim=0)
+                stacked_R = torch.cat(current_R, dim=0)
+                stacked_scale = torch.cat(current_scale, dim=0)
                 
                 # Calculate derivatives using the correct FPS for this pickle
                 # Velocity
                 kp_velocity = self.calculate_velocity(stacked_kp, fps)
                 exp_velocity = self.calculate_velocity(stacked_exp, fps)
+                R_velocity = self.calculate_velocity(stacked_R, fps)
+                scale_velocity = self.calculate_velocity(stacked_scale, fps)
                 features['kp_velocity'].extend(kp_velocity.unbind(0))
                 features['exp_velocity'].extend(exp_velocity.unbind(0))
+                features['R_velocity'].extend(R_velocity.unbind(0))
+                features['scale_velocity'].extend(scale_velocity.unbind(0))
                 
                 # Acceleration
                 kp_acceleration = self.calculate_acceleration(stacked_kp, fps)
@@ -148,7 +161,9 @@ class Dataset(torch.utils.data.Dataset):
             'kp_velocity': [],
             'exp_velocity': [],
             'kp_acceleration': [],
-            'exp_acceleration': []
+            'exp_acceleration': [],
+            'R_velocity': [],
+            'scale_velocity': []
         }
         
         # Process files using a thread pool
@@ -319,6 +334,8 @@ class Dataset(torch.utils.data.Dataset):
 
         # Calculate velocity and acceleration with the correct FPS
         kp_velocity = self.calculate_velocity(kps, output_fps)
+        R_velocity = self.calculate_velocity(rotations, output_fps)
+        scale_velocity = self.calculate_velocity(scales, output_fps)
         exp_velocity = self.calculate_velocity(exps, output_fps)
         kp_acceleration = self.calculate_acceleration(kps, output_fps)
         exp_acceleration = self.calculate_acceleration(exps, output_fps)
@@ -338,6 +355,8 @@ class Dataset(torch.utils.data.Dataset):
         kp_acceleration = self.normalize_features(feature=kp_acceleration, feature_type='kp_acceleration')
         exp_velocity = self.normalize_features(feature=exp_velocity, feature_type='exp_velocity')
         exp_acceleration = self.normalize_features(feature=exp_acceleration, feature_type='exp_acceleration')
+        R_velocity = self.normalize_features(feature=R_velocity, feature_type='R_velocity')
+        scale_velocity = self.normalize_features(feature=scale_velocity, feature_type='scale_velocity')
         
         # Metadata
         metadata = {
@@ -357,7 +376,9 @@ class Dataset(torch.utils.data.Dataset):
             'x_s': x_s,
             't': translations,
             'R': rotations,
+            'R_velocity': R_velocity,
             'scale': scales,
+            'scale_velocity': scale_velocity,
             'c_eyes_lst': c_eyes_lst,
             'c_lip_lst': c_lip_lst,
             'metadata': metadata

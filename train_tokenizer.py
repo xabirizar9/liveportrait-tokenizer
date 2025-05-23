@@ -65,6 +65,8 @@ class VQVAEModule(pl.LightningModule):
 
         velocity_dim_range = dim_ranges.get('kp_velocity', None)
         exp_velocity_dim_range = dim_ranges.get('exp_velocity', None)
+        R_velocity_dim_range = dim_ranges.get('R_velocity', None)
+        scale_velocity_dim_range = dim_ranges.get('scale_velocity', None)
 
         # Forward pass through VQVAE
         reconstr = self.vqvae(features)
@@ -86,11 +88,27 @@ class VQVAEModule(pl.LightningModule):
         else:
             exp_velocity_loss = 0
 
+        if R_velocity_dim_range is not None:
+            R_velocity_start, R_velocity_end = R_velocity_dim_range
+            R_velocity_loss = F.smooth_l1_loss(reconstr[..., R_velocity_start:R_velocity_end], features[..., R_velocity_start:R_velocity_end])
+            R_velocity_loss *= self.losses_config['lambda_velocity']
+        else:
+            R_velocity_loss = 0
+        
+        if scale_velocity_dim_range is not None:
+            scale_velocity_start, scale_velocity_end = scale_velocity_dim_range
+            scale_velocity_loss = F.smooth_l1_loss(reconstr[..., scale_velocity_start:scale_velocity_end], features[..., scale_velocity_start:scale_velocity_end])
+            scale_velocity_loss *= self.losses_config['lambda_velocity']
+        else:
+            scale_velocity_loss = 0
+
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
             velocity_loss +
-            exp_velocity_loss
+            exp_velocity_loss +
+            R_velocity_loss +
+            scale_velocity_loss
             # self.losses_config['lambda_commit'] * commit_loss
         )
 
@@ -103,6 +121,12 @@ class VQVAEModule(pl.LightningModule):
         
         if exp_velocity_dim_range is not None:
             self.log('train/exp_velocity_loss', exp_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
+
+        if R_velocity_dim_range is not None:
+            self.log('train/R_velocity_loss', R_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
+
+        if scale_velocity_dim_range is not None:
+            self.log('train/scale_velocity_loss', scale_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
 
         # Detailed component losses - only log epoch averages to wandb
         self.log('train/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
@@ -124,15 +148,34 @@ class VQVAEModule(pl.LightningModule):
         # Get actual batch size for this step
         batch_size = features.size(0)
 
-        velocity_dim_range = batch['dim_ranges'].get('kp_velocity', None)
+        kp_velocity_dim_range = batch['dim_ranges'].get('kp_velocity', None)
         exp_velocity_dim_range = batch['dim_ranges'].get('exp_velocity', None)
+        R_velocity_dim_range = batch['dim_ranges'].get('R_velocity', None)
+        scale_velocity_dim_range = batch['dim_ranges'].get('scale_velocity', None)
+
         # Forward pass through VQVAE
         reconstr = self.vqvae(features)
+
         # Calculate reconstruction loss
         recon_loss = F.smooth_l1_loss(reconstr, features)
 
-        if velocity_dim_range is not None:
-            velocity_start, velocity_end = velocity_dim_range
+        # Add velocity regularization for certain features
+        if R_velocity_dim_range is not None:
+            R_velocity_start, R_velocity_end = R_velocity_dim_range
+            R_velocity_loss = F.smooth_l1_loss(reconstr[..., R_velocity_start:R_velocity_end], features[..., R_velocity_start:R_velocity_end])
+            R_velocity_loss *= self.losses_config['lambda_velocity']
+        else:
+            R_velocity_loss = 0
+
+        if scale_velocity_dim_range is not None:
+            scale_velocity_start, scale_velocity_end = scale_velocity_dim_range
+            scale_velocity_loss = F.smooth_l1_loss(reconstr[..., scale_velocity_start:scale_velocity_end], features[..., scale_velocity_start:scale_velocity_end])
+            scale_velocity_loss *= self.losses_config['lambda_velocity']
+        else:
+            scale_velocity_loss = 0
+
+        if kp_velocity_dim_range is not None:
+            velocity_start, velocity_end = kp_velocity_dim_range
             velocity_loss = F.smooth_l1_loss(reconstr[..., velocity_start:velocity_end], features[..., velocity_start:velocity_end])
             velocity_loss *= self.losses_config['lambda_velocity']
         else:
@@ -144,11 +187,14 @@ class VQVAEModule(pl.LightningModule):
             exp_velocity_loss *= self.losses_config['lambda_velocity']
         else:
             exp_velocity_loss = 0
+        
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
             velocity_loss +
-            exp_velocity_loss
+            exp_velocity_loss +
+            R_velocity_loss +
+            scale_velocity_loss
             # self.losses_config['lambda_commit'] * commit_loss
         )
 
@@ -156,7 +202,13 @@ class VQVAEModule(pl.LightningModule):
         self.log('val/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
         self.log('val/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
         
-        if velocity_dim_range is not None:
+        if R_velocity_dim_range is not None:
+            self.log('val/R_velocity_loss', R_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
+
+        if scale_velocity_dim_range is not None:
+            self.log('val/scale_velocity_loss', scale_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
+
+        if kp_velocity_dim_range is not None:
             self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
 
         if exp_velocity_dim_range is not None:
