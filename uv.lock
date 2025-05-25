@@ -1520,6 +1520,7 @@ dependencies = [
     { name = "rich" },
     { name = "scikit-image" },
     { name = "scipy" },
+    { name = "snac" },
     { name = "torch" },
     { name = "torchaudio" },
     { name = "torchvision" },
@@ -1551,6 +1552,7 @@ requires-dist = [
     { name = "rich", specifier = "==13.7.1" },
     { name = "scikit-image", specifier = "==0.24.0" },
     { name = "scipy", specifier = "==1.13.1" },
+    { name = "snac", specifier = ">=1.2.1" },
     { name = "torch", specifier = ">=2.7.0" },
     { name = "torchaudio", specifier = ">=2.7.0" },
     { name = "torchvision", specifier = ">=0.22.0" },
@@ -3359,6 +3361,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/44/cd/a040c4b3119bbe532e5b0732286f805445375489fceaec1f48306068ee3b/smmap-5.0.2.tar.gz", hash = "sha256:26ea65a03958fa0c8a1c7e8c7a58fdc77221b8910f6be2131affade476898ad5", size = 22329, upload-time = "2025-01-02T07:14:40.909Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/04/be/d09147ad1ec7934636ad912901c5fd7667e1c858e19d355237db0d0cd5e4/smmap-5.0.2-py3-none-any.whl", hash = "sha256:b30115f0def7d7531d22a0fb6502488d879e75b260a9db4d0819cfb25403af5e", size = 24303, upload-time = "2025-01-02T07:14:38.724Z" },
+]
+
+[[package]]
+name = "snac"
+version = "1.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/38/5b64fb15c1cf02233252975c43c4b85ccacd9f77c55f7fee72b16b3bd2f6/snac-1.2.1.tar.gz", hash = "sha256:697f27fc5b98308eee8946739e5fd9c1b4ec629ef51b4f01c08dace1290685ee", size = 8737, upload-time = "2024-09-11T15:00:46.175Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/79/4f/6401dc74af3d9e9602209763eccbb7eac739c2501e499b51b560f71443c0/snac-1.2.1-py3-none-any.whl", hash = "sha256:96f90e221121ad03d6e3b060a787268b1efdbe424560a58f6f732df6d4914dc7", size = 8444, upload-time = "2024-09-11T15:00:44.906Z" },
 ]
 
 [[package]]

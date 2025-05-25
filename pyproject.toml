@@ -24,6 +24,7 @@ dependencies = [
     "rich==13.7.1",
     "scikit-image==0.24.0",
     "scipy==1.13.1",
+    "snac>=1.2.1",
     "torch>=2.7.0",
     "torchaudio>=2.7.0",
     "torchvision>=0.22.0",
