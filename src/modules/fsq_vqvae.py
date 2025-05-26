@@ -122,10 +122,6 @@ class FSQVAE(nn.Module):
 
         x_decoder = self.decoder(x_quantized)
 
-        # Ensure output dimensions match input dimensions
-        if x_decoder.size(2) != original_length:
-            x_decoder = F.interpolate(x_decoder, size=original_length, mode='linear', align_corners=False)
-
         x_out = self.postprocess(x_decoder)
 
         return x_out
@@ -147,47 +143,19 @@ class FSQVAE(nn.Module):
         x_encoder = self.postprocess(x_encoder)
         
         # Apply FSQ and get quantized vectors
-        x_quantized, indices = self.quantizer(x_encoder)
-        
-        # If indices were not returned (return_indices=False), calculate them
-        if indices is None:
-            print("Indices were not returned, calculating them")
-            # Reshape for codes_to_indices if needed
-            N, T, C = x_quantized.shape
-            # Calculate indices directly from quantized vectors
-            indices = self.quantizer.codes_to_indices(x_quantized.reshape(-1, self.output_emb_width))
-            indices = indices.reshape(N, T, 1)  # Reshape back to [N, T, 1]
-        
-        # Ensure proper shape for returning
-        N, T, C = x_encoder.shape if len(x_encoder.shape) == 3 else (B, T, self.output_emb_width)
-        indices = indices.view(N, T, -1)  # Reshape to [N, T, flattened_indices]
-        
-        print(f"Indices shape: {indices.shape}")
-    
-        # Return indices and None for distribution (to match original interface)
+        _, indices = self.quantizer(x_encoder)
+
         return indices
 
-    def decode(self, z: Tensor):
+    def decode(self, indices: Tensor):
         """
-        Decode from latent representation.
-        For FSQ, we'd typically need to process the indices, but for simplicity
-        we'll assume z contains the quantized representation directly.
+        Decode from indices.
         """
-        N, T, D = z.shape
-        
-        # Reshape to expected format for decoder [N, C, T]
-        z_reshaped = z.permute(0, 2, 1).contiguous()
-        
-        # Expected output length after decoding
-        expected_seq_len = T * (2 ** self.decoder.down_t)
-        
-        # Decode
-        x_decoder = self.decoder(z_reshaped)
-        
-        # Ensure consistent output length
-        if x_decoder.size(2) != expected_seq_len:
-            x_decoder = F.interpolate(x_decoder, size=expected_seq_len, mode='linear', align_corners=False)
-            
-        # Post-process
+        codes = self.quantizer.indices_to_codes(indices) # codes / z_hat
+
+        codes = self.preprocess(codes)
+
+        x_decoder = self.decoder(codes)
+
         x_out = self.postprocess(x_decoder)
         return x_out

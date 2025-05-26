@@ -1,7 +1,7 @@
 # Data parameters
 data_path: "dataset"
 output_path: "outputs"
-run_name: "vae-fsq-only_exp_rest-D10-L4"
+run_name: "vae-fsq-exp_rest-D4-L8"
 batch_size: 32
 num_workers: 8
 val_split: 0.1
@@ -64,7 +64,7 @@ feats_enabled:
 # Model parameters
 vqvae:
   nfeats: 45
-  levels: [4, 4, 4, 4, 4, 4, 4, 4]
+  levels: [4, 4, 4, 4]
   output_emb_width: 10
   down_t: 2
   stride_t: 1
@@ -91,7 +91,7 @@ optimizer:
 # Learning rate scheduler parameters
 lr_scheduler:
   type: "cosine_decay"  # options: "cosine_decay" or "none"
-  decay_steps: 10000  # total number of steps for cosine decay
+  decay_steps: 50000  # total number of steps for cosine decay
   min_lr_factor: 0.5  # minimum lr will be learning_rate * min_lr_factor 
   warmup_steps: 100  # number of steps for linear warmup
   warmup_factor: 0.1  # initial lr factor during warmup (lr will start at learning_rate * warmup_factor)

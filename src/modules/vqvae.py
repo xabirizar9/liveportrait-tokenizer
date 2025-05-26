@@ -232,17 +232,8 @@ class VQVae(nn.Module):
             N = z.size(0)
             x_d = z.view(N, -1, self.code_dim).permute(0, 2, 1).contiguous()
 
-        # Expected output length after decoding (assuming each token represents a timestep)
-        # This is an approximation - we multiply by stride_t^down_t since that's the theoretical downsampling
-        token_length = x_d.size(2)
-        expected_seq_len = token_length * (2 ** self.decoder.down_t)
-
         # decoder
         x_decoder = self.decoder(x_d)
-
-        # Ensure consistent output length
-        if x_decoder.size(2) != expected_seq_len:
-            x_decoder = F.interpolate(x_decoder, size=expected_seq_len, mode='linear', align_corners=False)
 
         x_out = self.postprocess(x_decoder)
         return x_out
@@ -263,14 +254,14 @@ class Encoder(nn.Module):
 
         # Simplified to single branch architecture
         blocks1 = []
-        filter_t, pad_t = stride_t * 2, stride_t // 2
+        kernel_t, pad_t = 3, 1
         blocks1.append(nn.Conv1d(input_emb_width, width, 3, 1, 1))
         blocks1.append(nn.ReLU())
 
         for i in range(down_t):
             input_dim = width
             block = nn.Sequential(
-                nn.Conv1d(input_dim, width, filter_t, stride_t, pad_t),
+                nn.Conv1d(input_dim, width, kernel_t, stride_t, pad_t),
                 Resnet1D(width, depth, dilation_growth_rate,
                         activation=activation, norm=norm),
             )
@@ -302,7 +293,7 @@ class Decoder(nn.Module):
 
         # Simplified to single branch architecture
         blocks1 = []
-        filter_t, pad_t = stride_t * 2, stride_t // 2
+        kernel_t, pad_t = 3, 1
         blocks1.append(nn.Conv1d(output_emb_width, width, 3, 1, 1))
         blocks1.append(nn.ReLU())
 
@@ -312,13 +303,13 @@ class Decoder(nn.Module):
                 Resnet1D(width, depth, dilation_growth_rate,
                         reverse_dilation=True, activation=activation,
                         norm=norm),
-                nn.Upsample(scale_factor=2, mode='nearest'),
-                nn.Conv1d(width, out_dim, 3, 1, 1))
+                nn.Upsample(scale_factor=1, mode='nearest'),
+                nn.Conv1d(width, out_dim, kernel_t, 1, 1))
             blocks1.append(block)
 
-        blocks1.append(nn.Conv1d(width, width, 3, 1, 1))
+        blocks1.append(nn.Conv1d(width, width, kernel_t, 1, 1))
         blocks1.append(nn.ReLU())
-        blocks1.append(nn.Conv1d(width, input_emb_width, 3, 1, 1))
+        blocks1.append(nn.Conv1d(width, input_emb_width, kernel_t, 1, 1))
         self.branch1 = nn.Sequential(*blocks1)
 
     def forward(self, x):

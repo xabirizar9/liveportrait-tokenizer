@@ -11,6 +11,7 @@ def collate_fn(batch, feats_enabled, max_seq_len=300):
         Batched tensors with standardized sequence length
     """
     features_list = []
+    fps_list = []
 
     for sample in batch:
         feats = []
@@ -26,7 +27,7 @@ def collate_fn(batch, feats_enabled, max_seq_len=300):
             if is_enabled:
                 # Reshape the feature and get its flattened dimension
                 if feat == 'exp_velocity' or feat == 'exp':
-                    # Remove some of the features from exp_velocity (e.g. first 15 of the exp dim range)
+                    # Remove some of the features from exp/exp_velocity (e.g. first 15 of the exp dim range)
                     reshaped_feat = sample[feat][..., :15, :].reshape(seq_len, -1)
                 else:
                     reshaped_feat = sample[feat].reshape(seq_len, -1)
@@ -56,8 +57,14 @@ def collate_fn(batch, feats_enabled, max_seq_len=300):
             features = torch.cat([features, padding], dim=0)
         
         features_list.append(features)
+        fps_list.append(sample['metadata']['output_fps'])
     
     # Stack along a new batch dimension
     batched_features = torch.stack(features_list)  # [batch_size, max_seq_len, feature_dim]
+    batched_fps = torch.tensor(fps_list)
     
-    return {'features': batched_features, "dim_ranges": dim_ranges}  # [batch_size, max_seq_len, feature_dim]
+    return {
+        'features': batched_features, 
+        'dim_ranges': dim_ranges,
+        'fps': batched_fps
+    }  # [batch_size, max_seq_len, feature_dim]
