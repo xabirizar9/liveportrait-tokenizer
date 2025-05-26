@@ -73,7 +73,7 @@ class FSQVAE(nn.Module):
                     levels=levels,
                     dim=output_emb_width,
                     preserve_symmetry=True,
-                    return_indices=False
+                    return_indices=True
                 )
             else:
                 print("Using ResidualFSQ")
@@ -151,6 +151,7 @@ class FSQVAE(nn.Module):
         
         # If indices were not returned (return_indices=False), calculate them
         if indices is None:
+            print("Indices were not returned, calculating them")
             # Reshape for codes_to_indices if needed
             N, T, C = x_quantized.shape
             # Calculate indices directly from quantized vectors
