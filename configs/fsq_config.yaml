@@ -1,7 +1,7 @@
 # Data parameters
 data_path: "dataset"
 output_path: "outputs"
-run_name: "vae-fsq-exp_rest-D4-L8"
+run_name: "vae-fsq-exp_rest_vel_reg-D4-L4"
 batch_size: 32
 num_workers: 8
 val_split: 0.1
@@ -63,9 +63,9 @@ feats_enabled:
 
 # Model parameters
 vqvae:
-  nfeats: 45
+  nfeats: 48
   levels: [4, 4, 4, 4]
-  output_emb_width: 10
+  output_emb_width: 4
   down_t: 2
   stride_t: 1
   width: 512
@@ -78,7 +78,7 @@ vqvae:
 
 losses:
   lambda_feature: 1.0
-  lambda_velocity: 0.3
+  lambda_velocity: 0.1
   lambda_commit: 0.02
   lambda_acceleration: 0.3
 

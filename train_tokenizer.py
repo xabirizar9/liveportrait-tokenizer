@@ -29,6 +29,45 @@ from src.dataset import Dataset
 from src.data_collator import collate_fn
 
 
+def calculate_derivative(features, fps, order=1):
+    """
+    Calculate time derivatives (velocity, acceleration, etc.) for any feature.
+    Args:
+        features: Tensor of feature values with shape [batch_size, seq_len, feature_dim]
+        fps: Tensor of shape [batch_size] containing fps for each sequence
+        order: Order of the derivative (1=velocity, 2=acceleration, etc.)
+    Returns:
+        Tensor of same shape as input with calculated derivatives
+    """
+    if order < 1:
+        return features
+    
+    batch_size, seq_len, feature_dim = features.shape
+    
+    # Calculate time delta for each sequence in the batch
+    dt = 1.0 / fps  # [batch_size]
+    dt = dt.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1] for broadcasting
+    
+    # Initialize derivative tensor with same shape as input
+    derivative = torch.zeros_like(features)
+    
+    # Central difference for interior points
+    derivative[:, 1:-1] = (features[:, 2:] - features[:, :-2]) / (2 * dt)
+    
+    # Forward/backward difference for endpoints
+    # For 2D slices, we need dt to be [batch_size, 1] for proper broadcasting
+    dt_2d = dt.squeeze(2)  # [batch_size, 1]
+    derivative[:, 0] = (features[:, 1] - features[:, 0]) / dt_2d
+    derivative[:, -1] = (features[:, -1] - features[:, -2]) / dt_2d
+    
+    # For higher order derivatives, recursively call this function
+    if order > 1:
+        derivative = calculate_derivative(derivative, fps, order-1)
+    
+    return derivative
+    
+
+
 class VQVAEModule(pl.LightningModule):
     def __init__(self, vqvae_config, losses_config, lr=1e-4,
                  lr_scheduler='cosine_decay', decay_steps=100000,
@@ -63,70 +102,30 @@ class VQVAEModule(pl.LightningModule):
         # Get actual batch size for this step
         batch_size = features.size(0)
 
-        velocity_dim_range = dim_ranges.get('kp_velocity', None)
-        exp_velocity_dim_range = dim_ranges.get('exp_velocity', None)
-        R_velocity_dim_range = dim_ranges.get('R_velocity', None)
-        scale_velocity_dim_range = dim_ranges.get('scale_velocity', None)
+        velocity = calculate_derivative(features, batch['fps'])
 
         # Forward pass through VQVAE
         reconstr = self.vqvae(features)
 
+        reconstr_velocity = calculate_derivative(reconstr, batch['fps'])
+
         # Calculate reconstruction loss
         recon_loss = F.smooth_l1_loss(reconstr, features)
 
-        if velocity_dim_range is not None:
-            velocity_start, velocity_end = velocity_dim_range
-            velocity_loss = F.smooth_l1_loss(reconstr[..., velocity_start:velocity_end], features[..., velocity_start:velocity_end])
-            velocity_loss *= self.losses_config['lambda_velocity']
-        else:
-            velocity_loss = 0
 
-        if exp_velocity_dim_range is not None:
-            exp_velocity_start, exp_velocity_end = exp_velocity_dim_range
-            exp_velocity_loss = F.smooth_l1_loss(reconstr[..., exp_velocity_start:exp_velocity_end], features[..., exp_velocity_start:exp_velocity_end])
-            exp_velocity_loss *= self.losses_config['lambda_velocity']
-        else:
-            exp_velocity_loss = 0
-
-        if R_velocity_dim_range is not None:
-            R_velocity_start, R_velocity_end = R_velocity_dim_range
-            R_velocity_loss = F.smooth_l1_loss(reconstr[..., R_velocity_start:R_velocity_end], features[..., R_velocity_start:R_velocity_end])
-            R_velocity_loss *= self.losses_config['lambda_velocity']
-        else:
-            R_velocity_loss = 0
-        
-        if scale_velocity_dim_range is not None:
-            scale_velocity_start, scale_velocity_end = scale_velocity_dim_range
-            scale_velocity_loss = F.smooth_l1_loss(reconstr[..., scale_velocity_start:scale_velocity_end], features[..., scale_velocity_start:scale_velocity_end])
-            scale_velocity_loss *= self.losses_config['lambda_velocity']
-        else:
-            scale_velocity_loss = 0
+        velocity_loss = F.smooth_l1_loss(reconstr_velocity, velocity)
 
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            velocity_loss +
-            exp_velocity_loss +
-            R_velocity_loss +
-            scale_velocity_loss
+            self.losses_config['lambda_velocity'] * velocity_loss
         )
 
         # Log metrics with proper sync_dist setting
         # Main loss metrics - show in progress bar but only log epoch averages to wandb
         self.log('train/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
-
-        if velocity_dim_range is not None:
-            self.log('train/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
-        
-        if exp_velocity_dim_range is not None:
-            self.log('train/exp_velocity_loss', exp_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
-
-        if R_velocity_dim_range is not None:
-            self.log('train/R_velocity_loss', R_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
-
-        if scale_velocity_dim_range is not None:
-            self.log('train/scale_velocity_loss', scale_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
-
+        self.log('train/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
+    
         # Detailed component losses - only log epoch averages to wandb
         self.log('train/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
 
@@ -145,72 +144,26 @@ class VQVAEModule(pl.LightningModule):
         # Get actual batch size for this step
         batch_size = features.size(0)
 
-        kp_velocity_dim_range = batch['dim_ranges'].get('kp_velocity', None)
-        exp_velocity_dim_range = batch['dim_ranges'].get('exp_velocity', None)
-        R_velocity_dim_range = batch['dim_ranges'].get('R_velocity', None)
-        scale_velocity_dim_range = batch['dim_ranges'].get('scale_velocity', None)
-
+        velocity = calculate_derivative(features, batch['fps'])
         # Forward pass through VQVAE
         reconstr = self.vqvae(features)
+        reconstr_velocity = calculate_derivative(reconstr, batch['fps'])
 
         # Calculate reconstruction loss
         recon_loss = F.smooth_l1_loss(reconstr, features)
 
-        # Add velocity regularization for certain features
-        if R_velocity_dim_range is not None:
-            R_velocity_start, R_velocity_end = R_velocity_dim_range
-            R_velocity_loss = F.smooth_l1_loss(reconstr[..., R_velocity_start:R_velocity_end], features[..., R_velocity_start:R_velocity_end])
-            R_velocity_loss *= self.losses_config['lambda_velocity']
-        else:
-            R_velocity_loss = 0
-
-        if scale_velocity_dim_range is not None:
-            scale_velocity_start, scale_velocity_end = scale_velocity_dim_range
-            scale_velocity_loss = F.smooth_l1_loss(reconstr[..., scale_velocity_start:scale_velocity_end], features[..., scale_velocity_start:scale_velocity_end])
-            scale_velocity_loss *= self.losses_config['lambda_velocity']
-        else:
-            scale_velocity_loss = 0
-
-        if kp_velocity_dim_range is not None:
-            velocity_start, velocity_end = kp_velocity_dim_range
-            velocity_loss = F.smooth_l1_loss(reconstr[..., velocity_start:velocity_end], features[..., velocity_start:velocity_end])
-            velocity_loss *= self.losses_config['lambda_velocity']
-        else:
-            velocity_loss = 0
-
-        if exp_velocity_dim_range is not None:
-            exp_velocity_start, exp_velocity_end = exp_velocity_dim_range
-            exp_velocity_loss = F.smooth_l1_loss(reconstr[..., exp_velocity_start:exp_velocity_end], features[..., exp_velocity_start:exp_velocity_end])
-            exp_velocity_loss *= self.losses_config['lambda_velocity']
-        else:
-            exp_velocity_loss = 0
+        velocity_loss = F.smooth_l1_loss(reconstr_velocity, velocity)
         
         # Total loss
         total_loss = (
             self.losses_config['lambda_feature'] * recon_loss + 
-            velocity_loss +
-            exp_velocity_loss +
-            R_velocity_loss +
-            scale_velocity_loss
-            # self.losses_config['lambda_commit'] * commit_loss
+            self.losses_config['lambda_velocity'] * velocity_loss
         )
 
         # For validation, we typically want epoch-level statistics only
         self.log('val/loss', total_loss, prog_bar=True, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
         self.log('val/recon_loss', recon_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
-        
-        if R_velocity_dim_range is not None:
-            self.log('val/R_velocity_loss', R_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
-
-        if scale_velocity_dim_range is not None:
-            self.log('val/scale_velocity_loss', scale_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
-
-        if kp_velocity_dim_range is not None:
-            self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
-
-        if exp_velocity_dim_range is not None:
-            self.log('val/exp_velocity_loss', exp_velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
-
+        self.log('val/velocity_loss', velocity_loss, sync_dist=True, rank_zero_only=True, on_step=False, on_epoch=True, batch_size=batch_size)
         return total_loss
 
 
