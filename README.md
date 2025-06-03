@@ -8,6 +8,11 @@ Run the setup.sh script to install all of the necessary dependencies:
 ./setup.sh
 ```
 
+### Testing tokenizer
+
+After installing the environment, you can now test the tokenizer in the `test_tokenizer.ipynb` notebook.
+
+
 ### Training model
 
 ```bash
