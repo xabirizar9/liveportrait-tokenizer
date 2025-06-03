@@ -1,0 +1,7 @@
+
+tokenizer_module:
+  lips_path: "outputs/modified_lips_vel_reg_fsq_D4/checkpoints/checkpoint_epoch=229.ckpt"
+  exp_path: "outputs/modified_rest_vel_reg_fsq_D4/checkpoints/checkpoint_epoch=459.ckpt"
+  rest_path: "outputs/modified_rest_fsq_D4/checkpoints/checkpoint_epoch=319.ckpt"
+  rot_scale_path: "outputs/modified_rot_scale_D4/checkpoints/checkpoint_epoch=339.ckpt"
+

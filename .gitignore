@@ -3,3 +3,4 @@ dataset
 pretrained_weights/
 *.pyc
 outputs/
+*.safetensors

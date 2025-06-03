@@ -1,12 +1,8 @@
 import torch
-import numpy as np
-import pandas as pd
 import os
 import pytorch_lightning as pl
 import wandb
 import yaml
-import signal
-import sys
 
 import torch.nn.functional as F
 import torch.distributed
@@ -20,11 +16,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader
 
-
-from src.modules.vqvae import VQVae
-from src.modules.fc_vqvae import FCVQVae
 from src.modules.fsq_vqvae import FSQVAE
-from src.modules.res_vqvae import ResVQVae
 from src.dataset import Dataset
 from src.data_collator import collate_fn
 
@@ -206,11 +198,6 @@ class VQVAEModule(pl.LightningModule):
             raise ValueError(f"Unknown learning rate scheduler: {self.lr_scheduler}. Use 'cosine_decay' or 'none'.")
 
 
-def load_config(config_path):
-    """Load configuration from YAML file."""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
 
 
 def main(config):

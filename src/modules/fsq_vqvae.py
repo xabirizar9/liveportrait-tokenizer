@@ -61,9 +61,12 @@ class FSQVAE(nn.Module):
 
         # Use the Group-Residual FSQ quantizer instead of QuantizeEMAReset
         levels = [levels[0]] * output_emb_width
+
+        self.fsq_levels = levels[0]
+        self.fsq_dims = output_emb_width
         print(f"FSQ Config:")
         if use_quantization:
-            print(f"Levels: {levels}")
+            print(f"Levels: {self.fsq_levels}")
             print(f"Output Emb Width: {output_emb_width}")
             print(f"Num Quantizers: {num_quantizers}")
 
