@@ -10,7 +10,7 @@ import os
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, data_path: str, split: str = 'train', val_split: float = 0.2, seed: int = 42, 
-                 compute_stats: bool = True, num_threads: int = 8):
+                 compute_stats: bool = True, num_threads: int = 8, device: str = 'cuda'):
         self.data_path = Path(data_path)
         self.pickle_dir = self.data_path / "pickles"
         self.split = split
@@ -308,9 +308,17 @@ class Dataset(torch.utils.data.Dataset):
         
         return result
 
-    def __getitem__(self, idx):
-        pickle_path = self.pickle_paths[idx]
+    def process_pickle_path(self, pickle_path: str) -> dict:
+        """
+        Process a single pickle file and return structured features.
+        This is the core logic extracted from __getitem__ for reusability.
         
+        Args:
+            pickle_path: Path to the pickle file to process
+            
+        Returns:
+            Dictionary containing processed and normalized features
+        """
         # Load pickle file
         with open(pickle_path, 'rb') as f:
             data = pickle.load(f)
@@ -383,6 +391,10 @@ class Dataset(torch.utils.data.Dataset):
             'c_lip_lst': c_lip_lst,
             'metadata': metadata
         }
+
+    def __getitem__(self, idx):
+        pickle_path = self.pickle_paths[idx]
+        return self.process_pickle_path(str(pickle_path))
 
     def __len__(self):
         return len(self.pickle_paths)

@@ -65,6 +65,7 @@ def prepare_features(sample, feats_enabled, only_lips, device="cuda"):
     for feat, metadata in feats_enabled.items():
         is_enabled = metadata['enabled']
         if is_enabled:
+            print(f"Using {feat}")
             if feat in ["exp", "exp_velocity"]:
                 if only_lips:
                     feature = sample[feat][:seq_len, :, 16:, :].reshape(1, seq_len, -1)
@@ -84,6 +85,8 @@ def prepare_features(sample, feats_enabled, only_lips, device="cuda"):
         features = torch.empty((1, seq_len, 0))
 
     features = features.to(device)
+    print("dims: ", dims)
+    print("Total dims: ", features.shape[-1])
     
     return features, dims
 
