@@ -2,38 +2,67 @@ from pathlib import Path
 import torch
 import yaml
 from src.modules.vqvae import VQVae
+from src.modules.fsq_vqvae import FSQVAE
 from train_tokenizer import VQVAEModule
 from torch.utils.data import Dataset
 
-def load_fsq_vae(model_path: Path) -> VQVae:
+def load_fsq_vae(model_path: Path, config_path: Path = None, default_config: dict = None) -> VQVae:
     """
     Load and prepare a VQVAE model from a checkpoint file.
     
     Args:
         model_path (Path): Path to the model checkpoint file
+        config_path (Path, optional): Path to the config file. If not provided, will try to find it in wandb directory
+        default_config (dict, optional): Default configuration to use if no config file is found
         
     Returns:
         VQVae: Prepared VQVAE model loaded on CUDA and in eval mode
     """
     pretrained = torch.load(model_path)
-    model_dir = model_path.parent.parent
-
-    if model_path.suffix == '.ckpt':
-        config_path = model_dir / 'wandb' / 'latest-run' / 'files' / 'config.yaml'
-    else:
-        config_path = model_path.parent / 'wandb' / 'latest-run' / 'files' / 'config.yaml'
-
-    config = yaml.safe_load(open(config_path, "r"))
-    feats_enabled = config['feats_enabled']['value']
-
-    print([feat for feat in sorted(feats_enabled) if feats_enabled[feat]['enabled']])
+    
+    # If config_path is not provided, try to find it in wandb directory
+    if config_path is None:
+        if model_path.suffix == '.ckpt':
+            config_path = model_path.parent.parent / 'wandb' / 'latest-run' / 'files' / 'config.yaml'
+        else:
+            config_path = model_path.parent / 'wandb' / 'latest-run' / 'files' / 'config.yaml'
+    
+    try:
+        config = yaml.safe_load(open(config_path, "r"))
+        feats_enabled = config['feats_enabled']['value']
+        vqvae_config = config["vqvae"]['value']
+    except (FileNotFoundError, KeyError):
+        # If config not found or doesn't have the expected structure,
+        # use default values that work for all FSQ models
+        feats_enabled = {}
+        
+        # Base FSQ model configuration
+        vqvae_config = {
+            "output_emb_width": 64,
+            "down_t": 2,
+            "stride_t": 2,
+            "width": 64,
+            "depth": 3,
+            "dilation_growth_rate": 3,
+            "activation": "relu",
+            "norm": None,
+            "levels": [5, 5, 5, 5],  # FSQ specific
+            "num_quantizers": 1,      # FSQ specific
+            "use_quantization": True  # FSQ specific
+        }
+        
+        # Update with model-specific config if provided
+        if default_config is not None:
+            vqvae_config.update(default_config)
+    
+    print([feat for feat in sorted(feats_enabled) if feats_enabled.get(feat, {}).get('enabled', False)])
     
     if model_path.suffix == '.ckpt':
-        vqvae_module = VQVAEModule(vqvae_config=config["vqvae"]['value'], losses_config=config["losses"])
+        vqvae_module = VQVAEModule(vqvae_config=vqvae_config, losses_config={})
         vqvae_module.load_state_dict(pretrained['state_dict'])
         vqvae = vqvae_module.vqvae
     else:
-        vqvae = VQVae(**config["vqvae"]['value'])
+        vqvae = FSQVAE(**vqvae_config)
         vqvae.load_state_dict(pretrained)
 
     vqvae.to("cuda")

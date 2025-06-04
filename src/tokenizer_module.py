@@ -3,19 +3,23 @@ import torch
 import yaml
 import math
 import pickle
+import os
+import shutil
 
 from collections import namedtuple
 from pathlib import Path
-from huggingface_hub import PyTorchModelHubMixin
+from huggingface_hub import ModelHubMixin, hf_hub_download, snapshot_download
+from typing import Optional, Union, Dict
 
 from utils.tokenizer_utils import load_fsq_vae, process_reconstruction
+from src.utils.helper import clean_state_dict
 
 from src.dataset import Dataset
 
 FSQ_VALUES = namedtuple('fsq_values', ['L', 'D'])
 
-class TokenizerModule(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, tokenizer_config: str = None):
+class TokenizerModule(nn.Module, ModelHubMixin):
+    def __init__(self, tokenizer_config: Union[str, Dict, None] = None):
         super().__init__()
 
         self.ds_path = Path("dataset")
@@ -40,15 +44,43 @@ class TokenizerModule(nn.Module, PyTorchModelHubMixin):
         self.mean = {k: v.to('cuda') for k, v in self.dataset.mean.items()}
         self.std = {k: v.to('cuda') for k, v in self.dataset.std.items()}
 
-
         # If tokenizer_config is None, we're likely loading from pretrained
         if tokenizer_config is not None:
-            self.tokenizer_config = yaml.safe_load(open(tokenizer_config, 'r'))['tokenizer_module']
+            # Handle both string paths and dictionaries
+            if isinstance(tokenizer_config, (str, Path)):
+                self.tokenizer_config = yaml.safe_load(open(tokenizer_config, 'r'))['tokenizer_module']
+            else:
+                self.tokenizer_config = tokenizer_config
 
-            self.lips_fsq, self.lips_feats = load_fsq_vae(Path(self.tokenizer_config['lips_path']))
-            self.exp_fsq, self.exp_feats = load_fsq_vae(Path(self.tokenizer_config['exp_path']))
-            self.rest_fsq, self.rest_feats = load_fsq_vae(Path(self.tokenizer_config['rest_path']))
-            self.rot_scale_fsq, self.rot_scale_feats = load_fsq_vae(Path(self.tokenizer_config['rot_scale_path']))
+            # Load FSQ models with their specific configurations
+            fsq_configs = {
+                'lips': {'nfeats': 15},  # Lips model dimensions
+                'exp': {'nfeats': 48},   # Expression model dimensions
+                'rest': {'nfeats': 132},  # Rest features dimensions
+                'rot_scale': {'nfeats': 10}  # Rotation and scale dimensions
+            }
+
+            # Load each FSQ model with its specific config
+            self.lips_fsq, self.lips_feats = load_fsq_vae(
+                Path(self.tokenizer_config['lips_path']),
+                config_path=self.tokenizer_config.get('lips_path_config'),
+                default_config=fsq_configs['lips']
+            )
+            self.exp_fsq, self.exp_feats = load_fsq_vae(
+                Path(self.tokenizer_config['exp_path']),
+                config_path=self.tokenizer_config.get('exp_path_config'),
+                default_config=fsq_configs['exp']
+            )
+            self.rest_fsq, self.rest_feats = load_fsq_vae(
+                Path(self.tokenizer_config['rest_path']),
+                config_path=self.tokenizer_config.get('rest_path_config'),
+                default_config=fsq_configs['rest']
+            )
+            self.rot_scale_fsq, self.rot_scale_feats = load_fsq_vae(
+                Path(self.tokenizer_config['rot_scale_path']),
+                config_path=self.tokenizer_config.get('rot_scale_path_config'),
+                default_config=fsq_configs['rot_scale']
+            )
 
             self.fsq_configs = {
                 "lips": FSQ_VALUES(L=self.lips_fsq.fsq_levels, D=self.lips_fsq.fsq_dims),
@@ -58,6 +90,7 @@ class TokenizerModule(nn.Module, PyTorchModelHubMixin):
             }
 
             self.fsq_ranges = self._calculate_fsq_ranges(self.fsq_configs)
+            
         # If tokenizer_config is None, the attributes will be loaded from the saved state
         self.exp_dims = {'exp': 48}
         self.lips_dims = {'exp': 15}
@@ -68,8 +101,224 @@ class TokenizerModule(nn.Module, PyTorchModelHubMixin):
             't': 3,
             'x_s': 63
         }
-        self.rot_scale_dims = {'R': 9, 'scale': 1} 
+        self.rot_scale_dims = {'R': 9, 'scale': 1}
 
+    def _save_pretrained(self, save_directory: str) -> None:
+        """Save the model weights and its configuration file to a directory."""
+        os.makedirs(save_directory, exist_ok=True)
+        
+        # Create fsq_models directory and its config subdirectory
+        fsq_models_dir = os.path.join(save_directory, "fsq_models")
+        fsq_configs_dir = os.path.join(fsq_models_dir, "configs")
+        os.makedirs(fsq_models_dir, exist_ok=True)
+        os.makedirs(fsq_configs_dir, exist_ok=True)
+
+        # Save the model weights
+        weights_path = os.path.join(save_directory, "pytorch_model.bin")
+        
+        # Get the state dict
+        state_dict = self.state_dict()
+        
+        # Save the model weights
+        torch.save(state_dict, weights_path)
+        
+        # Save FSQ models and update config paths
+        if hasattr(self, 'tokenizer_config'):
+            config = self.tokenizer_config.copy()  # Make a copy to modify paths
+            
+            # Save each FSQ model and update its path in the config
+            fsq_paths = ['lips_path', 'exp_path', 'rest_path', 'rot_scale_path']
+            for path_key in fsq_paths:
+                original_path = self.tokenizer_config[path_key]
+                filename = os.path.basename(original_path)
+                new_path = os.path.join(fsq_models_dir, filename)
+                
+                # Copy the FSQ model file
+                shutil.copy2(original_path, new_path)
+                
+                # Try to copy the config file if it exists
+                try:
+                    config_src = Path(original_path).parent.parent / 'wandb' / 'latest-run' / 'files' / 'config.yaml'
+                    if config_src.exists():
+                        config_dst = os.path.join(fsq_configs_dir, f"{filename}.yaml")
+                        shutil.copy2(config_src, config_dst)
+                except Exception:
+                    pass  # Skip if config doesn't exist
+                
+                # Update config with relative path
+                config[path_key] = os.path.join("fsq_models", filename)
+            
+            # Save the updated config
+            config_path = os.path.join(save_directory, "config.yaml")
+            with open(config_path, 'w') as f:
+                yaml.dump({'tokenizer_module': config}, f)
+
+    @classmethod
+    def _from_pretrained(
+        cls,
+        model_id: str,
+        revision: Optional[str] = None,
+        cache_dir: Optional[str] = None,
+        force_download: bool = False,
+        proxies: Optional[dict] = None,
+        resume_download: bool = False,
+        local_files_only: bool = False,
+        token: Optional[str] = None,
+        **model_kwargs,
+    ):
+        """Load a model from a pretrained model on the Hugging Face Hub."""
+        # Download the model weights and config
+        try:
+            # First try to download the config
+            config_path = hf_hub_download(
+                repo_id=model_id,
+                filename="config.yaml",
+                revision=revision,
+                cache_dir=cache_dir,
+                force_download=force_download,
+                proxies=proxies,
+                resume_download=resume_download,
+                token=token,
+                local_files_only=local_files_only,
+            )
+            
+            # Then download the model weights
+            weights_path = hf_hub_download(
+                repo_id=model_id,
+                filename="pytorch_model.bin",
+                revision=revision,
+                cache_dir=cache_dir,
+                force_download=force_download,
+                proxies=proxies,
+                resume_download=resume_download,
+                token=token,
+                local_files_only=local_files_only,
+            )
+            
+            # Load config if it exists
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)['tokenizer_module']
+                    
+                    # Download FSQ model files and their configs
+                    fsq_files = ['lips_path', 'exp_path', 'rest_path', 'rot_scale_path']
+                    for fsq_file in fsq_files:
+                        original_path = config[fsq_file]
+                        filename = os.path.basename(original_path)
+                        
+                        # Download the FSQ model file
+                        downloaded_path = hf_hub_download(
+                            repo_id=model_id,
+                            filename=f"fsq_models/{filename}",
+                            revision=revision,
+                            cache_dir=cache_dir,
+                            force_download=force_download,
+                            proxies=proxies,
+                            resume_download=resume_download,
+                            token=token,
+                            local_files_only=local_files_only,
+                        )
+                        
+                        # Try to download the FSQ config file
+                        try:
+                            fsq_config = hf_hub_download(
+                                repo_id=model_id,
+                                filename=f"fsq_models/configs/{filename}.yaml",
+                                revision=revision,
+                                cache_dir=cache_dir,
+                                force_download=force_download,
+                                proxies=proxies,
+                                resume_download=resume_download,
+                                token=token,
+                                local_files_only=local_files_only,
+                            )
+                        except Exception:
+                            fsq_config = None
+                        
+                        # Update the config with the downloaded paths
+                        config[fsq_file] = downloaded_path
+                        if fsq_config:
+                            config[f"{fsq_file}_config"] = fsq_config
+                    
+                    model_kwargs['tokenizer_config'] = config
+            
+            # Initialize model
+            model = cls(**model_kwargs)
+            
+            # Load weights
+            state_dict = torch.load(weights_path, map_location="cpu")
+            model.load_state_dict(state_dict)
+            
+            return model
+            
+        except Exception as e:
+            raise RuntimeError(
+                f"Error loading model from HuggingFace Hub: {e}"
+            ) from e
+
+    def state_dict(self):
+        """Get the state dict of the model including FSQ models and configurations."""
+        state_dict = {}
+        
+        # Save FSQ models if they exist
+        if hasattr(self, 'lips_fsq'):
+            state_dict['lips_fsq'] = self.lips_fsq.state_dict()
+            state_dict['exp_fsq'] = self.exp_fsq.state_dict()
+            state_dict['rest_fsq'] = self.rest_fsq.state_dict()
+            state_dict['rot_scale_fsq'] = self.rot_scale_fsq.state_dict()
+            
+            # Save FSQ configs
+            state_dict['fsq_configs'] = {
+                name: {'L': config.L, 'D': config.D}
+                for name, config in self.fsq_configs.items()
+            }
+            
+            # Save feature dimensions
+            state_dict['feat_dims'] = self.feat_dims
+            state_dict['exp_dims'] = self.exp_dims
+            state_dict['lips_dims'] = self.lips_dims
+            state_dict['rest_dims'] = self.rest_dims
+            state_dict['rot_scale_dims'] = self.rot_scale_dims
+            
+            # Save dataset statistics
+            state_dict['mean'] = {k: v.cpu() for k, v in self.mean.items()}
+            state_dict['std'] = {k: v.cpu() for k, v in self.std.items()}
+        
+        return state_dict
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        """Load a state dict into the model."""
+        # Clean the state dict to remove any 'module.' prefixes
+        state_dict = clean_state_dict(state_dict)
+        
+        # Load FSQ models
+        if 'lips_fsq' in state_dict:
+            self.lips_fsq.load_state_dict(state_dict['lips_fsq'])
+            self.exp_fsq.load_state_dict(state_dict['exp_fsq'])
+            self.rest_fsq.load_state_dict(state_dict['rest_fsq'])
+            self.rot_scale_fsq.load_state_dict(state_dict['rot_scale_fsq'])
+            
+            # Load FSQ configs
+            self.fsq_configs = {
+                name: FSQ_VALUES(L=config['L'], D=config['D'])
+                for name, config in state_dict['fsq_configs'].items()
+            }
+            
+            # Recalculate FSQ ranges
+            self.fsq_ranges = self._calculate_fsq_ranges(self.fsq_configs)
+            
+            # Load feature dimensions
+            self.feat_dims = state_dict['feat_dims']
+            self.exp_dims = state_dict['exp_dims']
+            self.lips_dims = state_dict['lips_dims']
+            self.rest_dims = state_dict['rest_dims']
+            self.rot_scale_dims = state_dict['rot_scale_dims']
+            
+            # Load dataset statistics
+            self.mean = {k: v.to('cuda') for k, v in state_dict['mean'].items()}
+            self.std = {k: v.to('cuda') for k, v in state_dict['std'].items()}
+            
+        return super().load_state_dict({}, strict=False)
 
     def _calculate_fsq_ranges(self, fsq_configs):
         ranges = {}
@@ -261,4 +510,3 @@ class TokenizerModule(nn.Module, PyTorchModelHubMixin):
         feature_tensor[..., 142:205] = feature_dict['x_s'].reshape(1, -1, 63)
 
         return feature_tensor
-        
