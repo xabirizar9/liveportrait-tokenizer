@@ -25,7 +25,7 @@ from src.config.crop_config import CropConfig
 from src.utils.video import get_fps
 from src.utils.io import dump
 from src.utils.helper import is_square_video
-from train_tokenizer import Dataset
+from train_tokenizer import MotionDataset
 from src.utils.rprint import rlog as log
 
 
@@ -40,7 +40,7 @@ def partial_fields(target_class, kwargs):
     return target_class(**{k: v for k, v in kwargs.items() if hasattr(target_class, k)})
 
 
-class Dataset(torch.utils.data.Dataset):
+class MotionDataset(torch.utils.data.Dataset):
     def __init__(self, data_path: str, split: str = 'train', val_split: float = 0.2, seed: int = 42):
         self.data_path = Path(data_path)
         self.video_dir = self.data_path / "train"
@@ -91,7 +91,7 @@ class Dataset(torch.utils.data.Dataset):
 
 
 
-class FilteredDataset(Dataset):
+class FilteredDataset(MotionDataset):
     """Wrapper around the base dataset to filter out already processed videos."""
     def __init__(self, base_dataset, output_dir):
         self.base_dataset = base_dataset
@@ -274,7 +274,7 @@ def custom_collate_fn(batch):
 
 def main(config):
     # Set up base dataset
-    base_dataset = Dataset(config['data_path'], split='train', val_split=0.0)
+    base_dataset = MotionDataset(config['data_path'], split='train', val_split=0.0)
     
     # Filter out already processed videos
     dataset = FilteredDataset(base_dataset, config['output_path'])

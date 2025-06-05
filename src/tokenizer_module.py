@@ -13,8 +13,8 @@ from typing import Optional, Union, Dict
 
 from utils.tokenizer_utils import load_fsq_vae, process_reconstruction
 from src.utils.helper import clean_state_dict
-
-from src.dataset import Dataset
+from utils.tokenizer_utils import prepare_features
+from src.motion_dataset import MotionDataset
 
 FSQ_VALUES = namedtuple('fsq_values', ['L', 'D'])
 
@@ -34,7 +34,7 @@ class TokenizerModule(nn.Module, ModelHubMixin):
             'x_s': [1, 21, 3]
         }
         # Create a dataset instance for reusing utility methods
-        self.dataset = Dataset(
+        self.dataset = MotionDataset(
             data_path=str(self.ds_path), 
             split='test',
             val_split=0.1,
@@ -369,6 +369,22 @@ class TokenizerModule(nn.Module, ModelHubMixin):
             raise ValueError(f"Local code {local_code} is out of range for FSQ '{fsq_name}' (max local code: {end_idx - start_idx - 1})")
         
         return global_code
+    
+
+    def _prepare_features_dict(self, feature_dict: dict) -> torch.Tensor:
+        metadata = feature_dict['metadata']
+        feature_tensor = torch.zeros((1, metadata['n_frames'], 205), device="cuda")
+
+        feature_tensor[..., :9] = feature_dict['R'].reshape(1, -1, 9)
+        feature_tensor[..., 9:11] = feature_dict['c_eyes_lst'].reshape(1, -1, 2)
+        feature_tensor[..., 11:12] = feature_dict['c_lip_lst'].reshape(1, -1, 1)
+        feature_tensor[..., 12:75] = feature_dict['exp'].reshape(1, -1, 63)
+        feature_tensor[..., 75:138] = feature_dict['kp'].reshape(1, -1, 63)
+        feature_tensor[..., 138:139] = feature_dict['scale'].reshape(1, -1, 1)
+        feature_tensor[..., 139:142] = feature_dict['t'].reshape(1, -1, 3)
+        feature_tensor[..., 142:205] = feature_dict['x_s'].reshape(1, -1, 63)
+
+        return feature_tensor
 
 
     def _dump_to_pickle(self, output: dict, pickle_path: str):
@@ -376,6 +392,7 @@ class TokenizerModule(nn.Module, ModelHubMixin):
         video_id = Path(pickle_path).stem
 
         new_path = pickle_dir / f"{video_id}_reconstructed.pkl"
+        # new_path = "female_24fps_reconstructed.pkl"
         print(new_path)
 
         with open(new_path, "wb") as f:
@@ -436,8 +453,22 @@ class TokenizerModule(nn.Module, ModelHubMixin):
 
         return new_reconstr
     
+    def _prepare_sample(self, sample: dict) -> torch.Tensor:
+        rst_feats, self.rest_dims = prepare_features(sample, self.rest_feats, False, "cuda")
+        exp_feats, self.exp_dims = prepare_features(sample, self.exp_feats, False, "cuda")
+        lips_feats, self.lips_dims = prepare_features(sample, self.lips_feats, True, "cuda")
+        rot_scale_feats, self.rot_scale_dims = prepare_features(sample, self.rot_scale_feats, False, "cuda")
+        
+        return rst_feats, exp_feats, lips_feats, rot_scale_feats
 
-    def features_to_pickle(self, original: dict, reconstr: torch.Tensor, pickle_path: str):
+    def sample_to_features(self, sample: dict) -> torch.Tensor:
+        feature_tensor = self._prepare_features_dict(sample)
+
+        return feature_tensor
+
+    
+
+    def features_to_pickle(self, reconstr: torch.Tensor, pickle_path: str):
         # Get normalized tensors from reconstruction
         reconstr = reconstr.to('cpu').squeeze(0)
         frames = reconstr.shape[0]
@@ -463,7 +494,7 @@ class TokenizerModule(nn.Module, ModelHubMixin):
         # Pack features into output dictionary for pickle
         output = {
             "n_frames": frames,
-            "output_fps": original['metadata']['output_fps'],
+            "output_fps": 24,
             "motion": [
                 {
                     "kp": main_feats['kp'][i],
@@ -481,7 +512,7 @@ class TokenizerModule(nn.Module, ModelHubMixin):
         self._dump_to_pickle(output=output, pickle_path=pickle_path)
 
         return output
-    
+
 
     def pickle_to_features(self, pickle_path: str, device: str = 'cuda') -> dict:
         """
@@ -496,17 +527,7 @@ class TokenizerModule(nn.Module, ModelHubMixin):
             Dictionary containing processed and normalized features
         """
         feature_dict = self.dataset.process_pickle_path(pickle_path)
-        metadata = feature_dict['metadata']
 
-        feature_tensor = torch.zeros((1, metadata['n_frames'], 205), device=device)
-
-        feature_tensor[..., :9] = feature_dict['R'].reshape(1, -1, 9)
-        feature_tensor[..., 9:11] = feature_dict['c_eyes_lst'].reshape(1, -1, 2)
-        feature_tensor[..., 11:12] = feature_dict['c_lip_lst'].reshape(1, -1, 1)
-        feature_tensor[..., 12:75] = feature_dict['exp'].reshape(1, -1, 63)
-        feature_tensor[..., 75:138] = feature_dict['kp'].reshape(1, -1, 63)
-        feature_tensor[..., 138:139] = feature_dict['scale'].reshape(1, -1, 1)
-        feature_tensor[..., 139:142] = feature_dict['t'].reshape(1, -1, 3)
-        feature_tensor[..., 142:205] = feature_dict['x_s'].reshape(1, -1, 63)
+        feature_tensor = self._prepare_features_dict(feature_dict)
 
         return feature_tensor

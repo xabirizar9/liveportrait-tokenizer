@@ -228,3 +228,90 @@ def process_reconstruction(dims, reconstr, exp_lips, std, mean):
         reconstr_ind += indices
 
     return new_reconstr
+
+
+def merge_tokens(audio_tokens, motion_tokens):
+    """
+    Merge audio and motion tokens by concatenating motion tokens after SNAC tokens.
+    
+    Args:
+        audio_tokens: List of 3 tensors from SNAC encoder [level0, level1, level2]
+        motion_tokens: Tensor of shape (4, N) containing motion tokens
+    
+    Returns:
+        Tensor of shape [num_frames, 15] with SNAC tokens followed by motion tokens
+    """
+    frame_tokens = []
+
+    for i in range(audio_tokens[0].shape[-1]):
+        # Extract tokens for frame i
+        snac_1 = audio_tokens[0][:, i      ] + 128266
+        snac_2 = audio_tokens[1][:, 2*i    ] + 128266 +   4096
+        snac_3 = audio_tokens[2][:, 4*i    ] + 128266 + 2*4096
+        snac_4 = audio_tokens[2][:, 4*i + 1] + 128266 + 3*4096
+        snac_5 = audio_tokens[1][:, 2*i + 1] + 128266 + 4*4096
+        snac_6 = audio_tokens[2][:, 4*i + 2] + 128266 + 5*4096
+        snac_7 = audio_tokens[2][:, 4*i + 3] + 128266 + 6*4096
+
+        audio_frame_tokens = torch.cat([snac_1, snac_2, snac_3, snac_4, snac_5, snac_6, snac_7])
+
+        mot_tokens = motion_tokens[:, i*2:(i+1)*2].flatten() # (4, 2) -> (8,)
+        mot_tokens += 128266 + 7*4096
+        
+        # Concatenate audio tokens followed by motion tokens
+        frame_token = torch.cat([audio_frame_tokens, mot_tokens])
+        frame_tokens.append(frame_token)
+
+    # Convert to tensor: [num_frames, 15] (7 audio + 8 motion)
+    return torch.stack(frame_tokens)
+
+
+def unmerge_tokens(frame_tokens):
+    """
+    Unmerge concatenated frame tokens back into separate audio and motion tokens.
+    
+    Args:
+        frame_tokens: Tensor of shape [num_frames, 15] with audio tokens followed by motion tokens
+    
+    Returns:
+        Tuple of (audio_tokens, motion_tokens) where:
+        - audio_tokens: List of 3 tensors [level0, level1, level2] 
+        - motion_tokens: Tensor of shape (4, N)
+    """
+    num_frames = frame_tokens.shape[0]
+    
+    # Initialize output tensors
+    audio_level0 = torch.zeros((1, num_frames), dtype=torch.long, device=frame_tokens.device)
+    audio_level1 = torch.zeros((1, num_frames * 2), dtype=torch.long, device=frame_tokens.device)
+    audio_level2 = torch.zeros((1, num_frames * 4), dtype=torch.long, device=frame_tokens.device)
+    motion_tokens = torch.zeros((4, num_frames * 2), dtype=torch.long, device=frame_tokens.device)
+    
+    for i in range(num_frames):
+        frame_token = frame_tokens[i]
+        
+        # Extract audio tokens (first 7 tokens)
+        audio_frame_tokens = frame_token[:7]
+        
+        # Extract motion tokens (last 8 tokens)
+        mot_tokens = frame_token[7:] - (128266 + 7*4096)  # Remove offset
+        motion_tokens[:, i*2:(i+1)*2] = mot_tokens.reshape(4, 2)
+        
+        # Reconstruct SNAC tokens by removing offsets
+        snac_1 = audio_frame_tokens[0] - 128266
+        snac_2 = audio_frame_tokens[1] - (128266 + 4096)
+        snac_3 = audio_frame_tokens[2] - (128266 + 2*4096)
+        snac_4 = audio_frame_tokens[3] - (128266 + 3*4096)
+        snac_5 = audio_frame_tokens[4] - (128266 + 4*4096)
+        snac_6 = audio_frame_tokens[5] - (128266 + 5*4096)
+        snac_7 = audio_frame_tokens[6] - (128266 + 6*4096)
+        
+        # Place tokens back into their respective levels
+        audio_level0[:, i] = snac_1
+        audio_level1[:, 2*i] = snac_2
+        audio_level1[:, 2*i + 1] = snac_5
+        audio_level2[:, 4*i] = snac_3
+        audio_level2[:, 4*i + 1] = snac_4
+        audio_level2[:, 4*i + 2] = snac_6
+        audio_level2[:, 4*i + 3] = snac_7
+    
+    return [audio_level0, audio_level1, audio_level2], motion_tokens

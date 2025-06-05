@@ -17,7 +17,7 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader
 
 from src.modules.fsq_vqvae import FSQVAE
-from src.dataset import Dataset
+from src.motion_dataset import MotionDataset
 from src.data_collator import collate_fn
 
 
@@ -238,7 +238,7 @@ def main(config):
     # Get compute_stats from config, default to True if not specified
     compute_stats = config.get('compute_stats', True)
     # Create train dataset with normalization stats computation
-    train_dataset = Dataset(
+    train_dataset = MotionDataset(
         config['data_path'], 
         split='train', 
         val_split=config['val_split'], 
@@ -247,7 +247,7 @@ def main(config):
     )
     
     # Create validation dataset, reusing the statistics from training set
-    val_dataset = Dataset(
+    val_dataset = MotionDataset(
         config['data_path'], 
         split='val', 
         val_split=config['val_split'], 

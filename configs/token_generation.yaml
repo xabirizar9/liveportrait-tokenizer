@@ -1,0 +1,10 @@
+# Configuration for token generation
+data_path: "dataset"
+output_path: "dataset/tokens"
+split: "train"  # Use validation set for testing (smaller dataset)
+val_split: 0  # Small validation split for testing
+seed: 2
+num_workers: 8  # Increase workers for multi-GPU processing
+
+# Optional parameters for different splits
+# split: "train"  # Change to "train" for full training set processing 

@@ -17,7 +17,7 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader
 
 from src.modules.vqvae import VQVae
-from src.dataset import Dataset
+from src.motion_dataset import MotionDataset
 from src.data_collator import collate_fn
 
 
@@ -234,7 +234,7 @@ def main(args):
 
     # Set up data
     compute_stats = config.get('compute_stats', True)
-    train_dataset = Dataset(
+    train_dataset = MotionDataset(
         config['data_path'], 
         split='train', 
         val_split=config['val_split'], 
@@ -242,7 +242,7 @@ def main(args):
         compute_stats=compute_stats
     )
     
-    val_dataset = Dataset(
+    val_dataset = MotionDataset(
         config['data_path'], 
         split='val', 
         val_split=config['val_split'], 

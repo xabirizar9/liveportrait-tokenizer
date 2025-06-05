@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "albumentations==1.4.10",
+    "datasets>=3.6.0",
     "ffmpeg-python==0.2.0",
     "imageio==2.34.2",
     "imageio-ffmpeg==0.5.1",
@@ -29,7 +30,7 @@ dependencies = [
     "torchaudio>=2.7.0",
     "torchvision>=0.22.0",
     "tqdm==4.66.4",
-    "transformers==4.38.0",
+    "transformers==4.47.0",
     "tyro==0.8.5",
     "vector-quantize-pytorch>=1.22.16",
     "wandb>=0.19.10",

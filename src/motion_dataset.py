@@ -8,7 +8,7 @@ from tqdm import tqdm
 import os
 
 
-class Dataset(torch.utils.data.Dataset):
+class MotionDataset(torch.utils.data.Dataset):
     def __init__(self, data_path: str, split: str = 'train', val_split: float = 0.2, seed: int = 42, 
                  compute_stats: bool = True, num_threads: int = 8, device: str = 'cuda'):
         self.data_path = Path(data_path)
@@ -398,3 +398,197 @@ class Dataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.pickle_paths)
+
+    def resample_item(self, item, target_fps=None):
+        """
+        Resample an item (output from __getitem__) to a target framerate.
+        
+        Args:
+            item: Dictionary returned from __getitem__
+            target_fps: Target framerate (if None, returns item unchanged)
+            
+        Returns:
+            Resampled item dictionary
+        """
+        if target_fps is None:
+            return item
+            
+        original_fps = item['metadata']['output_fps']
+        original_frames = item['metadata']['n_frames']
+        
+        if original_fps == target_fps:
+            return item
+        
+        # Calculate new number of frames
+        ratio = target_fps / original_fps
+        target_frames = max(1, int(original_frames * ratio))
+        
+        def cubic_interpolate_1d(values, target_length):
+            """Vectorized cubic spline interpolation for 1D tensor"""
+            if target_length == 1:
+                return values[0:1]
+            
+            original_length = len(values)
+            if original_length == 1:
+                return values.repeat(target_length)
+            
+            if original_length == 2:
+                # Fall back to linear interpolation for 2 points
+                indices = torch.linspace(0, original_length - 1, target_length, device=values.device, dtype=values.dtype)
+                floor_indices = torch.floor(indices).long()
+                ceil_indices = torch.clamp(floor_indices + 1, max=original_length - 1)
+                weights = indices - floor_indices.float()
+                return values[floor_indices] * (1 - weights) + values[ceil_indices] * weights
+            
+            # Cubic spline interpolation for 3+ points using vectorized operations
+            device = values.device
+            dtype = values.dtype
+            
+            # Original and target time points
+            x_orig = torch.linspace(0, 1, original_length, device=device, dtype=dtype)
+            x_new = torch.linspace(0, 1, target_length, device=device, dtype=dtype)
+            
+            # Compute cubic spline coefficients using natural boundary conditions
+            h = x_orig[1:] - x_orig[:-1]  # intervals
+            n = original_length
+            
+            # Build tridiagonal system for second derivatives
+            A = torch.zeros(n, n, device=device, dtype=dtype)
+            b = torch.zeros(n, device=device, dtype=dtype)
+            
+            # Natural boundary conditions (second derivative = 0 at endpoints)
+            A[0, 0] = 1.0
+            A[n-1, n-1] = 1.0
+            
+            # Interior points - vectorized
+            if n > 2:
+                interior_indices = torch.arange(1, n-1, device=device)
+                A[interior_indices, interior_indices-1] = h[interior_indices-1]
+                A[interior_indices, interior_indices] = 2.0 * (h[interior_indices-1] + h[interior_indices])
+                A[interior_indices, interior_indices+1] = h[interior_indices]
+                
+                # Vectorized computation of b values
+                dy_right = (values[interior_indices+1] - values[interior_indices]) / h[interior_indices]
+                dy_left = (values[interior_indices] - values[interior_indices-1]) / h[interior_indices-1]
+                b[interior_indices] = 6.0 * (dy_right - dy_left)
+            
+            # Solve for second derivatives
+            try:
+                c = torch.linalg.solve(A, b)
+            except:
+                # Fallback to linear interpolation if spline fails
+                indices = torch.linspace(0, original_length - 1, target_length, device=device, dtype=dtype)
+                floor_indices = torch.floor(indices).long()
+                ceil_indices = torch.clamp(floor_indices + 1, max=original_length - 1)
+                weights = indices - floor_indices.float()
+                return values[floor_indices] * (1 - weights) + values[ceil_indices] * weights
+            
+            # Vectorized spline evaluation
+            # Find intervals for all target points at once
+            x_new_clamped = torch.clamp(x_new, x_orig[0], x_orig[-1])
+            
+            # Use searchsorted to find intervals for all points at once
+            indices = torch.searchsorted(x_orig[1:], x_new_clamped, right=False)
+            indices = torch.clamp(indices, 0, original_length - 2)
+            
+            # Vectorized cubic spline evaluation
+            dx = x_new_clamped - x_orig[indices]
+            h_i = h[indices]
+            
+            # Spline coefficients (vectorized)
+            a = values[indices]
+            b_coeff = (values[indices + 1] - values[indices]) / h_i - h_i * (2*c[indices] + c[indices + 1]) / 6.0
+            c_coeff = c[indices] / 2.0
+            d_coeff = (c[indices + 1] - c[indices]) / (6.0 * h_i)
+            
+            # Evaluate cubic polynomial (vectorized)
+            result = a + b_coeff * dx + c_coeff * dx**2 + d_coeff * dx**3
+            
+            # Handle boundary cases
+            left_mask = x_new < x_orig[0]
+            right_mask = x_new > x_orig[-1]
+            result[left_mask] = values[0]
+            result[right_mask] = values[-1]
+            
+            return result
+        
+        # Resample each temporal feature
+        resampled_item = {}
+        temporal_features = ['kp', 'exp', 'x_s', 't', 'R', 'scale', 'c_eyes_lst', 'c_lip_lst']
+        
+        for key, value in item.items():
+            if key == 'metadata':
+                # Update metadata
+                resampled_item[key] = {
+                    'pickle_path': value['pickle_path'],
+                    'n_frames': target_frames,
+                    'output_fps': target_fps
+                }
+            elif key in temporal_features and isinstance(value, torch.Tensor):
+                # Resample temporal features using cubic spline interpolation
+                if value.dim() == 1:
+                    # Handle 1D tensors (like scale)
+                    resampled_value = cubic_interpolate_1d(value, target_frames)
+                elif value.dim() == 2:
+                    # Handle 2D tensors (like c_eyes_lst, c_lip_lst, translations)
+                    resampled_value = torch.zeros(target_frames, value.shape[1])
+                    for i in range(value.shape[1]):
+                        resampled_value[:, i] = cubic_interpolate_1d(value[:, i], target_frames)
+                elif value.dim() == 3:
+                    # Handle 3D tensors (like rotations)
+                    resampled_value = torch.zeros(target_frames, value.shape[1], value.shape[2])
+                    for i in range(value.shape[1]):
+                        for j in range(value.shape[2]):
+                            resampled_value[:, i, j] = cubic_interpolate_1d(value[:, i, j], target_frames)
+                elif value.dim() == 4:
+                    # Handle 4D tensors (like kp, exp, x_s)
+                    resampled_value = torch.zeros(target_frames, value.shape[1], value.shape[2], value.shape[3])
+                    for i in range(value.shape[1]):
+                        for j in range(value.shape[2]):
+                            for k in range(value.shape[3]):
+                                resampled_value[:, i, j, k] = cubic_interpolate_1d(value[:, i, j, k], target_frames)
+                else:
+                    raise ValueError(f"Unsupported tensor dimension for feature {key}: {value.dim()}")
+                
+                resampled_item[key] = resampled_value
+            else:
+                # Keep non-temporal features as is
+                resampled_item[key] = value
+        
+        # Recalculate derivatives with the new framerate
+        if 'kp' in resampled_item:
+            resampled_item['kp_velocity'] = self.calculate_velocity(resampled_item['kp'], target_fps)
+            resampled_item['kp_acceleration'] = self.calculate_acceleration(resampled_item['kp'], target_fps)
+            # Re-normalize derivatives if normalization stats are available
+            if self.mean is not None and 'kp_velocity' in self.mean:
+                resampled_item['kp_velocity'] = self.normalize_features(resampled_item['kp_velocity'], 'kp_velocity')
+                resampled_item['kp_acceleration'] = self.normalize_features(resampled_item['kp_acceleration'], 'kp_acceleration')
+        
+        if 'exp' in resampled_item:
+            resampled_item['exp_velocity'] = self.calculate_velocity(resampled_item['exp'], target_fps)
+            resampled_item['exp_acceleration'] = self.calculate_acceleration(resampled_item['exp'], target_fps)
+            # Re-normalize derivatives if normalization stats are available
+            if self.mean is not None and 'exp_velocity' in self.mean:
+                resampled_item['exp_velocity'] = self.normalize_features(resampled_item['exp_velocity'], 'exp_velocity')
+                resampled_item['exp_acceleration'] = self.normalize_features(resampled_item['exp_acceleration'], 'exp_acceleration')
+        
+        if 'R' in resampled_item:
+            resampled_item['R_velocity'] = self.calculate_velocity(resampled_item['R'], target_fps)
+            if self.mean is not None and 'R_velocity' in self.mean:
+                resampled_item['R_velocity'] = self.normalize_features(resampled_item['R_velocity'], 'R_velocity')
+        
+        if 'scale' in resampled_item:
+            resampled_item['scale_velocity'] = self.calculate_velocity(resampled_item['scale'], target_fps)
+            if self.mean is not None and 'scale_velocity' in self.mean:
+                resampled_item['scale_velocity'] = self.normalize_features(resampled_item['scale_velocity'], 'scale_velocity')
+        
+        return resampled_item
+    
+
+class SnacMotionDataset(MotionDataset):
+    def __init__(self, data_path: str, split: str = 'train', val_split: float = 0.2, seed: int = 42, 
+                 compute_stats: bool = True, num_threads: int = 8, device: str = 'cuda'):
+        super().__init__(data_path, split, val_split, seed, compute_stats, num_threads, device)
+        
+        self.audio_dir = Path(data_path) / "audios"
+        
